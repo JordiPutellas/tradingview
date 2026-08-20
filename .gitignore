@@ -1,0 +1,4 @@
+spike/f0/data/
+*.csv
+*.zip
+*.parquet
