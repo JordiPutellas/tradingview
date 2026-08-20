@@ -1,14 +1,33 @@
+# Despliegue en jordios (Hetzner CX23, 4 GB, compartido con Hermes).
+# Reglas del servidor:
+#   - TODO puerto con bind explícito a 127.0.0.1: Docker manipula iptables y
+#     se salta UFW; un "5433:5432" sin bind quedaría expuesto a internet.
+#   - 5432 está ocupado por jordios-postgres (Hermes): TimescaleDB va en 5433.
+#   - 8080 está ocupado por el placeholder de cloudflared: health en 8081.
+#   - mem_limit obligatorio: un OOM se llevaría por delante el agente de Hermes.
 services:
   timescaledb:
     image: timescale/timescaledb:2.17.2-pg16
+    restart: unless-stopped
+    mem_limit: 768m
     environment:
       POSTGRES_USER: btc
       POSTGRES_PASSWORD: btc
       POSTGRES_DB: btc
+      TS_TUNE_MEMORY: 512MB
+      TS_TUNE_NUM_CPUS: "2"
+    # shared_buffers conservador: prioriza no molestar a Hermes sobre el
+    # rendimiento de lectura (la API llega en F1c; ya se ajustará con datos).
+    command: >-
+      postgres
+      -c shared_buffers=128MB
+      -c effective_cache_size=384MB
+      -c maintenance_work_mem=64MB
+      -c max_connections=50
     volumes:
       - tsdata:/var/lib/postgresql/data
     ports:
-      - "127.0.0.1:5432:5432" # solo para inspección local con psql
+      - "127.0.0.1:5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U btc -d btc"]
       interval: 5s
@@ -18,6 +37,7 @@ services:
   collector:
     build: .
     restart: unless-stopped
+    mem_limit: 256m
     depends_on:
       timescaledb:
         condition: service_healthy
@@ -28,7 +48,7 @@ services:
       HEALTH_ADDR: ":8080"
       # HEALTHCHECK_URL: https://hc-ping.com/<uuid>   # activar en producción
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8081:8080"
 
 volumes:
   tsdata:
