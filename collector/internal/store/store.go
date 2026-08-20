@@ -53,6 +53,8 @@ type Store interface {
 	InsertGap(ctx context.Context, g Gap) (int64, error)
 	UpdateGapStatus(ctx context.Context, id int64, status, reason string) error
 	OpenGapCount(ctx context.Context, symbol string) (int, error)
+	// RollupRange recalcula candles_1m desde candles_1s para [from, to).
+	RollupRange(ctx context.Context, from, to time.Time) error
 }
 
 // PG implementa Store sobre pgxpool.
@@ -167,10 +169,18 @@ func (s *PG) BackfillDayDone(ctx context.Context, symbol string, day time.Time) 
 	return done, err
 }
 
-// RefreshCAggs refresca los continuous aggregates sobre un rango (tras un
-// backfill). Cada CALL va en autocommit: no puede ir en transacción.
+// RollupRange recalcula candles_1m (tabla real) desde candles_1s.
+func (s *PG) RollupRange(ctx context.Context, from, to time.Time) error {
+	if _, err := s.Pool.Exec(ctx, `SELECT rollup_candles_1m($1, $2)`, from, to); err != nil {
+		return fmt.Errorf("rollup candles_1m: %w", err)
+	}
+	return nil
+}
+
+// RefreshCAggs refresca los continuous aggregates >=5m sobre un rango (tras
+// un backfill). Cada CALL va en autocommit: no puede ir en transacción.
 func (s *PG) RefreshCAggs(ctx context.Context, from, to time.Time) error {
-	for _, view := range []string{"candles_1m", "candles_5m", "candles_15m", "candles_1h", "candles_4h", "candles_1d"} {
+	for _, view := range []string{"candles_5m", "candles_15m", "candles_1h", "candles_4h", "candles_1d"} {
 		if _, err := s.Pool.Exec(ctx,
 			fmt.Sprintf(`CALL refresh_continuous_aggregate('%s', $1, $2)`, view), from, to); err != nil {
 			return fmt.Errorf("refresh %s: %w", view, err)

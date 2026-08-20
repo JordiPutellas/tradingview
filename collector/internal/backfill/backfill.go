@@ -32,8 +32,12 @@ func Run(ctx context.Context, pg *store.PG, symbol string, from, to time.Time, c
 			return fmt.Errorf("backfill %s: %w", day.Format("2006-01-02"), err)
 		}
 	}
-	slog.Info("backfill: refreshing continuous aggregates", "from", from, "to", to.AddDate(0, 0, 1))
-	return pg.RefreshCAggs(ctx, from, to.AddDate(0, 0, 1))
+	end := to.AddDate(0, 0, 1)
+	slog.Info("backfill: rolling up candles_1m and refreshing CAggs", "from", from, "to", end)
+	if err := pg.RollupRange(ctx, from, end); err != nil {
+		return err
+	}
+	return pg.RefreshCAggs(ctx, from, end)
 }
 
 func backfillDay(ctx context.Context, pg *store.PG, symbol string, day time.Time, cacheDir string) error {

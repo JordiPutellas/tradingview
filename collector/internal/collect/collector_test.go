@@ -61,6 +61,8 @@ func (f *fakeStore) UpdateGapStatus(_ context.Context, id int64, status, reason 
 
 func (f *fakeStore) OpenGapCount(context.Context, string) (int, error) { return 0, nil }
 
+func (f *fakeStore) RollupRange(context.Context, time.Time, time.Time) error { return nil }
+
 func (f *fakeStore) snapshot() (map[int64]store.StoredCandle, []store.Gap) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -68,19 +68,23 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
-// splitStatements separa por ';' a final de línea. Las migraciones no usan
-// funciones plpgsql, así que el corte ingenuo es seguro.
+// splitStatements separa por ';' a final de línea, respetando cuerpos de
+// función delimitados por dollar-quoting ($$...$$), donde hay ';' internos.
 func splitStatements(sql string) []string {
 	var out []string
 	var cur strings.Builder
+	inDollar := false
 	for _, line := range strings.Split(sql, "\n") {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "--") || trimmed == "" {
+		if !inDollar && (strings.HasPrefix(trimmed, "--") || trimmed == "") {
 			continue
 		}
 		cur.WriteString(line)
 		cur.WriteString("\n")
-		if strings.HasSuffix(trimmed, ";") {
+		if n := strings.Count(line, "$$"); n%2 == 1 {
+			inDollar = !inDollar
+		}
+		if !inDollar && strings.HasSuffix(trimmed, ";") {
 			out = append(out, cur.String())
 			cur.Reset()
 		}

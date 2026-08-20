@@ -253,6 +253,13 @@ func (c *Collector) runGapMachine(ctx context.Context, g gapSpec) error {
 	if err := c.Store.UpdateGapStatus(ctx, gapID, store.GapResolved, ""); err != nil {
 		return err
 	}
+	// Recalcular candles_1m del rango reconciliado. No fatal: el job SQL de
+	// rollup (ventana 3 h) lo cubriría igualmente si el hueco es reciente.
+	rollFrom := plan.Rest.Start.Truncate(time.Minute)
+	rollTo := g.endTime.Truncate(time.Minute).Add(time.Minute)
+	if err := c.Store.RollupRange(ctx, rollFrom, rollTo); err != nil {
+		slog.Warn("rollup after reconcile failed (SQL job will catch up)", "err", err)
+	}
 	slog.Info("gap reconciled via REST", "gap_id", gapID, "from_id", g.fromID, "until_id", g.untilID)
 	return nil
 }
