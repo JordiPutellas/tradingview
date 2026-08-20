@@ -1,4 +1,5 @@
 spike/f0/data/
+collector/data/
 *.csv
 *.zip
 *.parquet

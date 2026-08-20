@@ -42,7 +42,8 @@ Dashboard de gráficos de Bitcoin auto-alojado, de uso personal, orientado al **
 | Motor gráfico         | **Lightweight Charts v5** (Apache 2.0)       | Sin contrato, panes nativos, hit-testing nativo, plugins de dibujo existentes     |
 | Licencia              | Open source puro                             | La Charting Library exige servicio público y tiene 50.000 USD de daños liquidados |
 | Instrumento principal | **BTCUSDT perpetuo** (Binance Futures UM)    | Mayor densidad de trades/s → velas de 1-10s más limpias                           |
-| Fuente de velas de 1s | **aggTrades reconstruidos**                  | Futures NO tiene klines de 1s nativas                                             |
+| Fuente de velas de 1s | **aggTrades reconstruidos**                  | Futures NO tiene klines de 1s nativas (ni stream WS de trades individuales)       |
+| Fidelidad de velas 1s | **Dos niveles: `realtime` → `exact_t1`**     | El sesgo de frontera de aggTrades (trampa 9) no es corregible en vivo; el job T+1 de F1b recalcula desde `daily/trades` y deja las velas exactas |
 | Validación cruzada    | Klines 1s nativas de **spot**                | Verificar que la reconstrucción es correcta                                       |
 | Colector              | **Go**                                       | Estabilidad en proceso 24/7, baja huella, sin sorpresas de GC                     |
 | Base de datos         | **TimescaleDB**                              | Continuous aggregates, ecosistema Postgres, compresión nativa                     |
@@ -123,9 +124,10 @@ Si LWC v5 + plugin de dibujo resulta inviable (drag/hit-testing inestable, rendi
 
 ### RF-3 — Validación de integridad
 
-- **RF-3.1** Comparar velas de 1s reconstruidas contra klines 1s nativas de **spot** (mismo periodo) y contra la kline 1m oficial de **futures** (suma de 60 velas de 1s = 1 vela de 1m)
+- **RF-3.1** Comparar velas de 1s reconstruidas contra klines 1s nativas de **spot** (mismo periodo) y contra la kline 1m oficial de **futures** (suma de 60 velas de 1s = 1 vela de 1m). F0 midió el techo alcanzable: el volumen diario cuadra al satoshi, pero ~4% de minutos difieren por el sesgo de frontera (trampa 9)
 - **RF-3.2** Detectar huecos por discontinuidad de `aggTradeId`, no solo por tiempo
-- **RF-3.3** Job periódico de reconciliación contra REST
+- **RF-3.3** La reconciliación de integridad se basa SIEMPRE en **volumen** (comparación exacta en punto fijo) y en **continuidad de `aggTradeId`** (exacta). NUNCA en conteo de trades: los IDs quemados por STP hacen que `sum(l-f+1)` sobrecuente ~0,08%/día (trampa 12)
+- **RF-3.4** Job periódico de reconciliación contra REST, dentro de la ventana de 48 h (trampa 10)
 
 ### RF-4 — API
 
@@ -146,8 +148,13 @@ Si LWC v5 + plugin de dibujo resulta inviable (drag/hit-testing inestable, rendi
 
 - **RF-6.1** Autenticación vía Cloudflare Access
 - **RF-6.2** Monitorización: ping periódico del colector a healthchecks.io
-- **RF-6.3** Alerta específica de "última vela recibida hace > N segundos" (detecta streams zombis: conexión viva, datos parados)
+- **RF-6.3** **[CRÍTICO]** Alerta específica de "última vela recibida hace > N segundos" (detecta streams zombis: conexión viva, datos parados). Con la ventana REST de 48 h (trampa 10), un colector caído sin que nadie se entere durante >48 h deja un agujero irrecuperable por REST hasta el bulk del día siguiente; esta alerta es la que protege esa ventana
 - **RF-6.4** Backup periódico de la BD a almacenamiento de objetos
+
+### RF-7 — Corrección batch de fidelidad (F1b, NO en el colector)
+
+- **RF-7.1** Job T+1 que recalcula las velas 1s del día anterior desde `futures/um/daily/trades` (trades individuales, con CHECKSUM) y sobreescribe las velas aproximadas marcándolas `quality='exact_t1'`. F0 demostró que las klines oficiales se reconstruyen exactas 1440/1440 desde ese fichero; coste ~41 MB/día
+- **RF-7.2** Los timeframes ≥1m se sobreescriben con las klines oficiales de data.binance.vision: pasa de 96,7% de minutos exactos (límite del dato aggTrade) a 100%, gratis
 
 ---
 
@@ -171,15 +178,22 @@ Si LWC v5 + plugin de dibujo resulta inviable (drag/hit-testing inestable, rendi
 CREATE TABLE candles_1s (
   ts            TIMESTAMPTZ  NOT NULL,   -- SIEMPRE UTC
   symbol        TEXT         NOT NULL,   -- 'BTCUSDT-PERP'
-  open          DOUBLE PRECISION NOT NULL,
-  high          DOUBLE PRECISION NOT NULL,
-  low           DOUBLE PRECISION NOT NULL,
-  close         DOUBLE PRECISION NOT NULL,
-  volume        DOUBLE PRECISION NOT NULL,
-  buy_volume    DOUBLE PRECISION NOT NULL,  -- para delta/CVD futuro
-  trade_count   INTEGER      NOT NULL,
+  -- Precios y volúmenes en punto fijo BIGINT escala 1e8 (decisión F1a):
+  -- la reconciliación por volumen (RF-3.3) exige comparación exacta, y los
+  -- floats no la garantizan. La conversión a decimal es cosa de la API.
+  open          BIGINT       NOT NULL,
+  high          BIGINT       NOT NULL,
+  low           BIGINT       NOT NULL,
+  close         BIGINT       NOT NULL,
+  volume        BIGINT       NOT NULL,
+  buy_volume    BIGINT       NOT NULL,  -- para delta/CVD futuro
+  trade_count   BIGINT       NOT NULL,
   first_agg_id  BIGINT       NOT NULL,      -- trazabilidad y detección de gaps
   last_agg_id   BIGINT       NOT NULL,
+  quality       TEXT         NOT NULL DEFAULT 'realtime',
+    -- 'realtime'   : construida en vivo desde el WS (sesgo de frontera, trampa 9)
+    -- 'reconciled' : rellenada/verificada vía REST fromId tras un hueco
+    -- 'exact_t1'   : recalculada desde daily/trades por el job T+1 (exacta)
   PRIMARY KEY (symbol, ts)
 );
 SELECT create_hypertable('candles_1s', 'ts');
@@ -206,6 +220,8 @@ CREATE TABLE drawings (
 );
 ```
 
+**Sobre `quality`:** F0 demostró que la misma vela de 1s puede tener tres orígenes con fidelidades distintas (vivo, reconciliada por REST, recalculada exacta desde trades individuales). Sin esta columna, el job T+1 sobreescribiría velas sin dejar rastro de qué corrigió, y sería imposible auditar qué partes del histórico son exactas y cuáles aproximadas — o detectar que el job T+1 lleva días sin ejecutarse.
+
 **Nota crítica sobre `candles_1m` y superiores:** deben tener retención **infinita** (no caen con la política de 6 meses), porque son la capa histórica permanente. Las continuous aggregates se materializan desde `candles_1s` mientras existe; para periodos anteriores a la retención, se rellenan por backfill directo de klines 1m desde data.binance.vision.
 
 ---
@@ -220,6 +236,10 @@ CREATE TABLE drawings (
 6. **`1mo`, no `1M`** — la nomenclatura de data.binance.vision para el intervalo mensual.
 7. **`forceOrder` incompleto** — el stream de liquidaciones solo emite un snapshot por segundo desde abril 2021; no sirve para volumen total de liquidaciones. Relevante solo si se aborda esa feature.
 8. **OI histórico: 30 días** — la API solo devuelve los últimos 30 días de Open Interest. Si se quiere histórico largo, hay que capturarlo desde el día 1.
+9. **Sesgo de frontera de aggTrades (F0-H1)** — un aggTrade agrupa los fills de una misma orden taker al mismo precio, y su `T` es el timestamp del **primer** fill (verificado en 939.658/939.658 aggregates multi-trade). En un día real, 256.784 aggregates abarcaron >0 ms y **7.977 cruzaron un borde de segundo** (140 un borde de minuto), desplazando todo su volumen al segundo del primer fill. Efecto medido a 1s: 17% de segundos con volumen desplazado (|dV| medio 0,29 BTC, máx 36,6 BTC), 6,5% con OHLC desviado (medio 0,15 USD, máx 52,8 USD). El volumen diario cuadra al satoshi: se desplaza, no se pierde. **No corregible en tiempo real** (futures no tiene stream WS de trades individuales, solo `@aggTrade`); corregible en batch a T+1 desde `futures/um/daily/trades` (RF-7.1).
+10. **Ventana REST de 48 h (F0-H3)** — `/fapi/v1/aggTrades` devuelve `{"code":-4166,"msg":"Search window is restricted to recent 2 days only."}` para datos de hace >2 días, tanto con `startTime` como con `fromId` (verificado empíricamente con ambos). Implicación operacional: un hueco solo es reconciliable por REST durante ~48 h; después hay que esperar al fichero diario de data.binance.vision (disponible ~08:00-09:00 UTC del día siguiente). La monitorización de frescura (RF-6.3) es lo único que protege esa ventana.
+11. **Ruta `/market` en el WS de futures (F1a)** — desde el aviso del 2026-03-06, los streams de mercado de futures están enrutados: `wss://fstream.binance.com/market/ws/btcusdt@aggTrade`. La ruta antigua sin enrutar (`/ws/...`) **conecta, acepta el SUBSCRIBE y no envía NADA** para `@aggTrade`, `@markPrice` o `@kline` (solo siguen fluyendo los streams "public" como `@bookTicker`): un stream zombi de manual, indistinguible de un mercado parado si no se monitoriza la frescura. Verificado empíricamente el 2026-08-20.
+12. **IDs de trade quemados por STP (F0-H2)** — el Self-Trade Prevention (obligatorio en futures desde dic-2024, modo `EXPIRE_MAKER`) consume IDs de trade sin ejecutar volumen: 19.726 IDs inexistentes en un día real, 4.246 de ellos dentro de rangos `[f,l]` de aggregates. `sum(last_trade_id-first_trade_id+1)` sobrecuenta ~0,08% frente al `count` oficial. La reconciliación de integridad NUNCA debe basarse en conteo de trades: solo volumen (exacto) y continuidad de `aggTradeId` (RF-3.3).
 
 ---
 
@@ -227,9 +247,9 @@ CREATE TABLE drawings (
 
 | Fase    | Contenido                                                                                     | Horas         |
 | ------- | --------------------------------------------------------------------------------------------- | ------------- |
-| **F0**  | Spike de validación: reconstruir 1 día de velas de 1s desde aggTrades y comprobar que cuadran | 8-12          |
+| **F0**  | ✅ HECHO — Spike de validación (veredicto positivo con caveats; ver `spike/f0/RESULTADOS.md`) | 8-12          |
 | **F1a** | Colector Go: WS + reconexión + reconciliación + TimescaleDB                                   | 40-70         |
-| **F1b** | Backfill histórico desde data.binance.vision                                                  | 10-15         |
+| **F1b** | Backfill histórico + job T+1 de corrección exacta (RF-7.1) + sobreescritura ≥1m (RF-7.2)      | 12-20         |
 | **F1c** | API (REST + WS)                                                                               | 15-25         |
 | **F1d** | Frontend LWC: velas, timeframes, streaming, lazy-loading                                      | 30-50         |
 | **F1e** | Integración del plugin de dibujo + persistencia                                               | 20-40         |
