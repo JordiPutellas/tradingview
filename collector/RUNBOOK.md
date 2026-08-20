@@ -1,7 +1,18 @@
 # RUNBOOK — Colector F1a
 
 Cómo arrancar, probar y operar el colector. Los cuatro criterios de éxito de
-F1a están en las secciones 2-5.
+F1a están en las secciones 2-5, **verificados en el VPS `jordios` el
+2026-08-20** (evidencia en cada sección).
+
+## 0. Particularidades del despliegue en jordios
+
+- Servidor compartido con Hermes (4 GB): TimescaleDB con `mem_limit: 768m` y
+  `shared_buffers=128MB`; colector con `mem_limit: 256m`.
+- **5432 ocupado** por `jordios-postgres` (Hermes) → TimescaleDB en **5433**.
+- **8080 ocupado** por el placeholder de cloudflared → health en **8081**.
+- Todo `ports:` con bind explícito `127.0.0.1` (Docker se salta UFW).
+- Ruta en el servidor: `~/btcdash/collector`. Deploy: `rsync` desde el repo y
+  `docker compose up -d --build`.
 
 ## 1. Arranque
 
@@ -50,7 +61,7 @@ normal y sigue el mismo camino):
 
 ```bash
 docker network disconnect collector_default collector-collector-1
-sleep 30
+sleep 180   # >90s: cortes menores los absorbe TCP sin desconexión (verificado)
 docker network connect collector_default collector-collector-1
 ```
 
@@ -92,7 +103,7 @@ está cubierta por test (`TestClassifyExactBoundary`, `TestStartupGapOlderThanWi
 ## 5. Criterio 4 — Expone su estado de salud
 
 ```bash
-curl -s localhost:8080/health | jq
+curl -s localhost:8081/health | jq   # en jordios; en local, el puerto que mapee el compose
 ```
 
 Campos: `status` (ok/stale — stale devuelve HTTP 503), `ws_connected`,
@@ -100,10 +111,23 @@ Campos: `status` (ok/stale — stale devuelve HTTP 503), `ws_connected`,
 métrica anti-zombi: un WS conectado que no entrega datos dispara esto, no el
 uptime del proceso), `last_candle_ts`, `buffer_len`, `open_gaps`.
 
-Ping saliente: define `HEALTHCHECK_URL` (healthchecks.io). Solo se emite
-mientras el dato está fresco; si el stream se para, el ping cesa y la alerta
-externa salta aunque el proceso viva. Con la ventana REST de 48 h, configura
-el check con margen: periodo 1-2 min, gracia ≤ 30 min.
+### Alta en healthchecks.io (pendiente — pasos exactos)
+
+El colector ya emite pings si `HEALTHCHECK_URL` está definida, y funciona
+igual sin fallar si está vacía (estado actual). Cuando crees la cuenta:
+
+1. Crea un check en healthchecks.io llamado `btcdash-collector`.
+2. Configuración recomendada: **Period = 1 minuto, Grace = 10 minutos**.
+   El colector pinga cada minuto SOLO si el dato está fresco (<30 s desde el
+   último aggTrade); si el stream se para —aunque el proceso viva, trampa 11—
+   el ping cesa y la alerta salta a los ~11 min. Margen de sobra dentro de la
+   ventana REST de 48 h.
+3. Copia la URL del check (`https://hc-ping.com/<uuid>`) en
+   `docker-compose.yml` → servicio `collector` → `HEALTHCHECK_URL`.
+4. En el servidor: `cd ~/btcdash/collector && docker compose up -d collector`
+   (recrea el contenedor con la variable).
+5. Verifica en healthchecks.io que llegan pings, y prueba la alerta parando
+   el colector 15 min (`docker compose stop collector` … `start`).
 
 ## 6. Backfill histórico
 
@@ -120,13 +144,51 @@ Nota: el backfill de aggTrades produce `quality='realtime'` (misma fidelidad
 que el directo, con el sesgo de frontera de la trampa 9). `exact_t1` queda
 reservado al job T+1 de F1b.
 
-## 7. Estado de verificación en este entorno
+## 7. Estado de verificación (VPS jordios, 2026-08-20)
 
 | Prueba | Estado |
 | --- | --- |
 | Tests unitarios y de integración (`go test ./...`) | ✅ pasan (agregación, Classify+frontera 40h, hueco vivo reconciliado, idempotencia, pending_bulk, reconexión WS real) |
 | Smoke test contra Binance real (WS `/market/ws` + agregación) | ✅ 44 velas/45s, ids contiguos, 0 gaps |
-| `docker compose up` end-to-end con TimescaleDB | ⚠️ **pendiente**: Docker Desktop no tiene la integración WSL activada en esta distro y no pudo arrancarse desde la sesión. Los pasos de las secciones 1-5 quedan listos para ejecutarse en cuanto se active (Docker Desktop → Settings → Resources → WSL integration). |
+| Migraciones contra TimescaleDB 2.17.2 real | ✅ sin errores a la primera; reejecución idempotente (0 reaplicaciones) |
+| Retención: 1s cae, 1m sobrevive | ✅ demostrado con datos sintéticos: `run_job(1000)` borró el chunk viejo de `candles_1s` (180→0 filas) y `candles_1m` conservó sus 3 filas; `candles_5m` las siguió agregando desde 1m |
+| Drill arranque limpio | ✅ `up -d` → migraciones → `ws connected` → velas en BD en <30 s |
+| Drill ingesta en tiempo real | ✅ 43 velas 1s en 43 s, precios reales, rollup 1m funcionando (job SQL cada minuto) |
+| Drill desconexión forzada del WS | ✅ corte de red de 3 min: idle-timeout 90 s → backoff 16/32/64 s → reconexión → hueco de 3.082 aggTrades reconciliado en 3,3 s, 181 velas `reconciled`, gap `resolved`. NOTA: un corte <90 s lo absorbe TCP sin pérdida ni reconexión (verificado con un corte de 34 s) |
+| Drill hueco provocado (stop 4 min) | ✅ apagado ordenado (última vela = último segundo antes del stop), rearranque con gap `reason='restart'` de 12.381 aggTrades reconciliado en 11 s; segundo frontera reconstruido completo desde `first_agg_id` |
+
+## 7b. Retención y purga manual
+
+Desde la migración 003 la retención de `candles_1s` es **infinita** (decisión
+2026-08-20: comprimir sí, borrar no). La compresión a los 7 días sigue activa.
+Verificado en el VPS: cero `policy_retention` en `timescaledb_information.jobs`.
+
+Coste estimado: ~2,7 GB/año de velas 1s sin comprimir (F0), bastante menos
+tras compresión. Disco libre en jordios tras el despliegue (imágenes
+incluidas): **24 GB** → margen para muchos años. Vigilancia: `df -h /` y
+`SELECT hypertable_size('candles_1s');` de vez en cuando.
+
+Si algún día hiciera falta purgar 1s antiguo (la capa 1m+ NO se ve afectada,
+está demostrado con prueba real):
+
+```sql
+-- borra chunks de candles_1s anteriores a la fecha dada; irreversible
+SELECT drop_chunks('candles_1s', older_than => '2027-01-01'::timestamptz);
+```
+
+## 7c. Reinicio de kernel PENDIENTE
+
+El VPS corre el kernel 6.8.0-137 con el 138 ya instalado: hay un reinicio
+pendiente. **No se ha reiniciado** (decisión: lo hace el usuario cuando le
+convenga, Hermes también se ve afectado). Checklist post-reinicio:
+
+1. `ssh jordios` entra (Tailscale arriba).
+2. Hermes: `docker ps` muestra `jordios-postgres` healthy y su agente activo.
+3. cloudflared: `systemctl status cloudflared` activo (túnel al placeholder).
+4. Colector: los dos contenedores `collector-*` arriba solos
+   (`restart: unless-stopped` + docker.service habilitado — verificado),
+   `curl -s 127.0.0.1:8081/health` → `status: ok`, y en `data_gaps` debe
+   aparecer un hueco `restart` resuelto cubriendo el reinicio.
 
 ## 8. Limitaciones conocidas (F1a)
 

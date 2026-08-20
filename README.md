@@ -50,7 +50,7 @@ Dashboard de gráficos de Bitcoin auto-alojado, de uso personal, orientado al **
 | Hosting               | **Hetzner** (~4-5 €/mes, UE)                 | Oracle Free recortado y con terminación automática desde 18-ago-2026              |
 | Exposición            | **Cloudflare Tunnel + Access**               | Gratis, soporta WebSockets, sin abrir puertos                                     |
 | Frontend              | Cloudflare Pages                             | Estático, gratis                                                                  |
-| Retención 1s          | **Últimos N meses** (definir N; sugerido 6)  | El resto en 1m+; lo antiguo es re-descargable de data.binance.vision              |
+| Retención 1s          | **Infinita** (decisión 2026-08-20)           | Comprimir sí, borrar no: ~2,7 GB/año con 27 GB libres, y el usuario revisa operaciones antiguas. Purga manual documentada en el RUNBOOK por si acaso |
 | Estrategia gráfico    | Directo a LWC, **sin prototipo comparativo** | Plan B documentado, no ejecutado                                                  |
 
 ### Plan B (documentado, no activado)
@@ -120,7 +120,7 @@ Si LWC v5 + plugin de dibujo resulta inviable (drag/hit-testing inestable, rendi
 - **RF-2.2** **Paginar SIEMPRE por `fromId`**, nunca por `startTime = últimoT + 1` (se pierden trades del mismo milisegundo)
 - **RF-2.3** Los segundos sin trades no generan vela (no rellenar con velas vacías; decidir el comportamiento visual en el frontend)
 - **RF-2.4** Timeframes superiores derivados por agregación desde 1s, anclados a **medianoche UTC**
-- **RF-2.5** Timeframes no estándar (10s, 45m, 3h) calculados al vuelo; los comunes (1m, 5m, 15m, 1h, 4h, 1D) materializados como continuous aggregates
+- **RF-2.5** Timeframes no estándar (10s, 45m, 3h) calculados al vuelo. `candles_1m` es **tabla real** (no CAgg: F1b la sobreescribe con klines oficiales, RF-7.2, y una CAgg no admite escritura), alimentada por rollup desde 1s; los comunes ≥5m (5m, 15m, 1h, 4h, 1D) son continuous aggregates **derivadas de `candles_1m`**, para que la corrección de F1b se propague hacia arriba sola
 
 ### RF-3 — Validación de integridad
 
@@ -139,7 +139,7 @@ Si LWC v5 + plugin de dibujo resulta inviable (drag/hit-testing inestable, rendi
 
 - **RF-5.1** Gráfico de velas con LWC v5, con `series.update()` en streaming (nunca `setData()`)
 - **RF-5.2** Lazy-loading del histórico por rango visible (no cargar meses de 1s de golpe)
-- **RF-5.3** Selector de timeframes: 1s, 5s, 10s, 15s, 30s, 45s, 1m, 3m, 5m, 15m, 30m, 45m, 1h, 2h, 3h, 4h, 6h, 8h, 12h, 1D, 3D, 5D, 1S, 1M
+- **RF-5.3** Selector de timeframes — los 24 de TradingView: 1s, 5s, 10s, 15s, 30s, 45s, 1m, 3m, 5m, 15m, 30m, 45m, 1h, 2h, 3h, 4h, 6h, 8h, 12h, 1D, 3D, 5D, 1S, 2S, 1M, 3M, 6M, 12M
 - **RF-5.4** Herramientas de dibujo mínimas: línea horizontal, línea de tendencia, rectángulo/zona, texto, medición
 - **RF-5.5** Los dibujos persisten al cambiar de timeframe y entre sesiones
 - **RF-5.6** Atribución a TradingView visible (`attributionLogo: true`) — obligación de la licencia Apache 2.0
@@ -198,8 +198,8 @@ CREATE TABLE candles_1s (
 );
 SELECT create_hypertable('candles_1s', 'ts');
 
--- Retención: 1s solo los últimos N meses
-SELECT add_retention_policy('candles_1s', INTERVAL '6 months');
+-- Retención: INFINITA (decisión 2026-08-20; la migración 003 elimina la
+-- política de 6 meses de la 001). Compresión a los 7 días sí sigue activa.
 
 -- Registro de huecos detectados
 CREATE TABLE data_gaps (
@@ -222,7 +222,22 @@ CREATE TABLE drawings (
 
 **Sobre `quality`:** F0 demostró que la misma vela de 1s puede tener tres orígenes con fidelidades distintas (vivo, reconciliada por REST, recalculada exacta desde trades individuales). Sin esta columna, el job T+1 sobreescribiría velas sin dejar rastro de qué corrigió, y sería imposible auditar qué partes del histórico son exactas y cuáles aproximadas — o detectar que el job T+1 lleva días sin ejecutarse.
 
-**Nota crítica sobre `candles_1m` y superiores:** deben tener retención **infinita** (no caen con la política de 6 meses), porque son la capa histórica permanente. Las continuous aggregates se materializan desde `candles_1s` mientras existe; para periodos anteriores a la retención, se rellenan por backfill directo de klines 1m desde data.binance.vision.
+```sql
+-- candles_1m: TABLA REAL (decisión F1a, ver motivo en RF-2.5), misma
+-- estructura que candles_1s pero con quality 'derived' | 'official'.
+-- Alimentada por rollup_candles_1m() (job cada minuto, ventana 3 h; y
+-- llamadas explícitas tras reconciliar o backfillear). El rollup NUNCA pisa
+-- filas 'official'. Los timeframes >=5m son CAggs sobre candles_1m.
+```
+
+**Nota sobre `candles_1m` y superiores:** capa histórica permanente e independiente de `candles_1s`: `candles_1m` es una tabla real sin política de retención y las CAggs ≥3m derivan de ella (verificado con prueba real: al dropar chunks de 1s, la capa 1m+ queda intacta). Aunque hoy la retención de 1s es infinita, esta independencia se mantiene por diseño: si algún día se purga 1s, el histórico 1m+ no se ve afectado. F1b sobreescribirá 1m con klines oficiales (`quality='official'`).
+
+**Qué timeframes se materializan (decisión F1a, migración 004):**
+
+- **Materializados** — `candles_1m` (tabla real) + CAggs: 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1D. Los comunes con rangos visibles largos.
+- **Al vuelo desde `candles_1s`** — 5s, 10s, 15s, 30s, 45s: un rango visible de sub-minuto son ≤10k filas; agregar en la query es trivial y evita 5 CAggs con refresh continuo sobre la hypertable más caliente.
+- **Al vuelo desde `candles_1m`** — 45m, 3h (no estándar).
+- **Al vuelo desde `candles_1d`** — 3D, 5D, S, 2S, M, 3M, 6M, 12M: un año son 365 filas de 1D; el coste es nulo y los anclajes raros (semana en lunes, meses de calendario) los resuelve la API con `time_bucket(origin/timezone)` en F1c, sin pelearse con las restricciones de anclaje de las CAggs.
 
 ---
 
