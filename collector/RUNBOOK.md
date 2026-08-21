@@ -212,7 +212,27 @@ está demostrado con prueba real):
 SELECT drop_chunks('candles_1s', older_than => '2027-01-01'::timestamptz);
 ```
 
-## 7c. Reinicio de kernel PENDIENTE
+## 7c. Cifras con el histórico completo cargado (2026-08-21, cierre F1b)
+
+Medición con 2 años de 1s + 7 años de 1m cargados y el colector ingiriendo:
+
+| Métrica | Valor |
+| --- | --- |
+| `candles_1s` | 61.110.976 filas: 60.993.008 `realtime` + 85.639 `exact_t1` + 32.329 `reconciled` (2024-08-21 → ahora) |
+| `candles_1m` | 3.656.057 filas desde 2019-09-08 17:57 (99,99% `official`) |
+| Integridad 2 años | **0 discontinuidades de aggTradeId** en 61,05M velas (excluidas 21 filas `agg_id=0` del T+1); cobertura 96,80% de segundos; conteo exacto contra `backfill_progress` |
+| CAggs | 0 diferencias contra la base en 1h (mar-2025), 1d (dic-2024) y 5m (día T+1); volumen del día T+1 exacto al satoshi entre 1s y 1m |
+| RAM | collector 30,3 MiB/256 · **timescaledb 392,1 MiB/768** (I/O acumulado del backfill: 14,4 GB read / 64,2 GB write) · Hermes intacto |
+| Disco | 19 GB usados / **18 GB libres** (53%); la compresión a 7 días seguirá reduciendo los chunks del backfill |
+| `data_gaps` | 6 huecos, **todos `resolved`** (incluidas las 9 h de la parada del backfill); 0 `pending_bulk` |
+| Salud | `status: ok`, frescura 39 ms, buffer 0 |
+
+**Conclusión: NO escalar el servidor.** Con la carga completa, TimescaleDB usa
+la mitad de su `mem_limit` y el sistema conserva >2,5 GiB disponibles y swap
+intacto. El backfill (el pico de I/O y RAM de la vida del sistema) ya pasó.
+Revisar solo si F1c (API) cambia el patrón de lecturas.
+
+## 7d. Reinicio de kernel PENDIENTE
 
 El VPS corre el kernel 6.8.0-137 con el 138 ya instalado: hay un reinicio
 pendiente. **No se ha reiniciado** (decisión: lo hace el usuario cuando le
@@ -234,6 +254,14 @@ convenga, Hermes también se ve afectado). Checklist post-reinicio:
   posible pérdida con ruido si nadie atiende la alerta en días.
 - Durante una reconciliación larga los trades vivos se encolan (64k) y el WS
   puede llegar a desconectarse por backpressure; se recupera solo por el
-  mismo mecanismo de huecos.
+  mismo mecanismo de huecos. **Observado con carga real** (2026-08-21, tras
+  las 9 h de parada del backfill de 1s):
+  `15:57:09 gap de 2,66M aggTrades reconciliado → 15:57:10 ws disconnected
+  ("unexpected EOF" tras 37 min conectado) → 15:57:12 ws connected + gap de
+  2 min ("stream discontinuity") → 15:57:16 segundo gap reconciliado`.
+  El sistema se recuperó solo de su propio efecto secundario, pero la
+  cascada es real, no hipótesis. Recomendación operativa: **no lanzar el
+  T+1 (ni otros batch pesados) en paralelo a una reconciliación larga** —
+  tras un arranque con horas de hueco, deja que el colector empalme primero.
 - `trade_count` hereda la sobrecuenta ~0,08% de los IDs quemados por STP
   (trampa 12): nunca usarlo para reconciliación.

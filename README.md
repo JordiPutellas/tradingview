@@ -126,7 +126,7 @@ Si LWC v5 + plugin de dibujo resulta inviable (drag/hit-testing inestable, rendi
 
 - **RF-3.1** Comparar velas de 1s reconstruidas contra klines 1s nativas de **spot** (mismo periodo) y contra la kline 1m oficial de **futures** (suma de 60 velas de 1s = 1 vela de 1m). F0 midió el techo alcanzable: el volumen diario cuadra al satoshi, pero ~4% de minutos difieren por el sesgo de frontera (trampa 9)
 - **RF-3.2** Detectar huecos por discontinuidad de `aggTradeId`, no solo por tiempo
-- **RF-3.3** La reconciliación de integridad se basa SIEMPRE en **volumen** (comparación exacta en punto fijo) y en **continuidad de `aggTradeId`** (exacta). NUNCA en conteo de trades: los IDs quemados por STP hacen que `sum(l-f+1)` sobrecuente ~0,08%/día (trampa 12)
+- **RF-3.3** La reconciliación de integridad se basa SIEMPRE en **volumen** (comparación exacta en punto fijo) y en **continuidad de `aggTradeId`** (exacta). NUNCA en conteo de trades: los IDs quemados por STP hacen que `sum(l-f+1)` sobrecuente ~0,08%/día (trampa 12). Excepción: las filas `exact_t1` con `first_agg_id=0` (segundos añadidos por el T+1 desde trades individuales) se verifican solo por volumen — excluirlas de todo chequeo de continuidad
 - **RF-3.4** Job periódico de reconciliación contra REST, dentro de la ventana de 48 h (trampa 10)
 
 ### RF-4 — API
@@ -193,7 +193,13 @@ CREATE TABLE candles_1s (
   quality       TEXT         NOT NULL DEFAULT 'realtime',
     -- 'realtime'   : construida en vivo desde el WS (sesgo de frontera, trampa 9)
     -- 'reconciled' : rellenada/verificada vía REST fromId tras un hueco
-    -- 'exact_t1'   : recalculada desde daily/trades por el job T+1 (exacta)
+    -- 'exact_t1'   : recalculada desde daily/trades por el job T+1 (exacta).
+    --   OJO: el T+1 preserva first/last_agg_id de las filas existentes, pero
+    --   los segundos NUEVOS que solo existen en trades individuales llevan
+    --   agg_id = 0 (los trades no traen aggTradeId). La integridad de las
+    --   filas exact_t1 se verifica SOLO por volumen (exacto contra la kline
+    --   oficial), NUNCA por continuidad de aggTradeId: el chequeo de
+    --   continuidad debe excluir first_agg_id = 0.
   PRIMARY KEY (symbol, ts)
 );
 SELECT create_hypertable('candles_1s', 'ts');
