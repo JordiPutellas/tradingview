@@ -82,63 +82,9 @@ const { lastT1, fresh } = await page.evaluate(() => {
 });
 check('streaming 1s en vivo', lastT1 > lastT0 && fresh < 10, `última vela hace ${fresh.toFixed(1)}s`);
 
-// 7. dibujo: crear horizontal por UI, verificar persistencia en API, recargar
-await page.click('button[data-tool="hline"]');
-await page.mouse.click(650, 300);
-await page.waitForTimeout(800);
-const drawn = await page.evaluate(() => window.__test.dm.getAllDrawings().map(d => ({ id: d.id, type: d.type })));
-check('horizontal creada', drawn.some(d => d.type === 'horizontal-line'), JSON.stringify(drawn));
-const apiDrawings = await (await fetch('http://127.0.0.1:8090/api/drawings')).json();
-check('persistida en API', apiDrawings.some(d => d.payload?.kind === 'plugin' && d.payload.data.type === 'horizontal-line'));
-
-// 8. zona de dos niveles: dos clicks, mueve junta, persiste
-// clicks espaciados: LWC absorbe dos clicks casi simultáneos en el mismo px
-await page.click('button[data-tool="zone2"]');
-await page.mouse.click(750, 250);
-await page.waitForTimeout(600);
-await page.mouse.click(850, 350);
-await page.waitForTimeout(800);
-const zone = await page.evaluate(() => {
-  const { zones, dm, series, chart } = window.__test;
-  const zs = [...zones.keys()];
-  if (!zs.length) return null;
-  const id = zs[0];
-  const a = dm.getDrawing(id + ':a'), b = dm.getDrawing(id + ':b');
-  if (!a || !b) return { missing: true };
-  const pa0 = a.anchors[0].price, pb0 = b.anchors[0].price;
-  // drag REAL del ancla de A con eventos sintéticos: deben moverse LAS DOS
-  dm.selectDrawing(id + ':a');
-  const cont = document.getElementById('chart');
-  const rect = cont.getBoundingClientRect();
-  const x = chart.timeScale().timeToCoordinate(a.anchors[0].time);
-  const y = series.priceToCoordinate(pa0);
-  const fire = (type, px, py) => cont.dispatchEvent(new MouseEvent(type, {
-    bubbles: true, clientX: rect.left + px, clientY: rect.top + py, button: 0 }));
-  fire('mousedown', x, y);
-  for (let i = 1; i <= 8; i++) fire('mousemove', x, y - 5 * i);
-  fire('mouseup', x, y - 40);
-  return { pa0, pb0, dA: a.anchors[0].price - pa0, dB: b.anchors[0].price - pb0 };
-});
-check('zona 2 niveles con precios reales', zone && !zone.missing && zone.pa0 > 1000 && zone.pb0 > 1000, JSON.stringify(zone));
-check('zona se mueve JUNTA manteniendo distancia', !!zone && zone.dA !== 0 && Math.abs(zone.dA - zone.dB) < Math.abs(zone.dA) * 0.01,
-  zone ? `dA=${zone.dA?.toFixed(2)} dB=${zone.dB?.toFixed(2)}` : 'sin zona');
-const apiDrawings2 = await (await fetch('http://127.0.0.1:8090/api/drawings')).json();
-check('zona persistida', apiDrawings2.some(d => d.payload?.kind === 'zone2'));
-
-// 9. recarga: los dibujos sobreviven a la sesión
-await page.reload();
-await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
-await page.waitForTimeout(1000);
-const restored = await page.evaluate(() => ({
-  types: window.__test.dm.getAllDrawings().map(d => d.type).sort(),
-  zonePrices: [...window.__test.zones.values()].map(z => [z.a.price, z.b.price]),
-}));
-check('dibujos restaurados tras recarga',
-  restored.types.includes('horizontal-line') && restored.types.filter(t => t === 'horizontal-ray').length === 2,
-  JSON.stringify(restored.types));
-check('zona restaurada con precios (no timestamps)',
-  restored.zonePrices.every(([a, b]) => a > 1000 && a < 1e6 && b > 1000 && b < 1e6),
-  JSON.stringify(restored.zonePrices));
+// 7-9. Los dibujos tienen su propia suite con gestos reales: draw-test.mjs
+//      (crear, arrastrar en dos ejes, seleccionar, redimensionar, panel,
+//      zona de dos niveles, medición y persistencia).
 
 // 10. F2b — colores REALES en el canvas, no las opciones de la serie.
 // El test de F2a comprobaba series.options(): eso solo dice qué pedimos, no
@@ -276,12 +222,12 @@ async function autoscaleProbe() {
   await page.click('button[data-tf="1D"]');
   await page.waitForFunction(() => window.__test.getTF().name === '1D' && window.__test.getBars().length > 100, { timeout: 20000 });
   const far = await page.evaluate(() => {
-    const { getBars, TOOL_DEFS, addDrawing } = window.__test;
+    const { getBars, engine, chart } = window.__test;
     const bars = getBars();
     const price = bars.at(-1)[4];
-    addDrawing(TOOL_DEFS.hline.make('zz-autoscale-test', [{ time: bars.at(-1)[0], price }]));
+    engine.addShape('hline', [{ t: bars.at(-1)[0], p: price }], { id: 'zz-autoscale-test' });
     // irse al principio del histórico: allí el precio es una fracción del actual
-    window.__test.chart.timeScale().setVisibleLogicalRange({ from: 0, to: 120 });
+    chart.timeScale().setVisibleLogicalRange({ from: 0, to: 120 });
     return price;
   });
   await page.waitForTimeout(600);
@@ -293,7 +239,12 @@ async function autoscaleProbe() {
     const h = document.getElementById('chart').clientHeight;
     return { top: series.coordinateToPrice(0), bottom: series.coordinateToPrice(h) };
   });
-  await page.evaluate(() => window.__test.dm.removeDrawing('zz-autoscale-test'));
+  await page.evaluate(() => {
+    const e = window.__test.engine;
+    e.shapes = e.shapes.filter(s => s.id !== 'zz-autoscale-test');
+    e.redraw();
+    fetch('/api/drawings/zz-autoscale-test', { method: 'DELETE' });
+  });
   return { far, ...view };
 }
 const as = await autoscaleProbe();
