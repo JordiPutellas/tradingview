@@ -140,6 +140,124 @@ check('zona restaurada con precios (no timestamps)',
   restored.zonePrices.every(([a, b]) => a > 1000 && a < 1e6 && b > 1000 && b < 1e6),
   JSON.stringify(restored.zonePrices));
 
+// 10. F2a — colores y márgenes
+const look = await page.evaluate(() => {
+  const { chart, series } = window.__test;
+  const so = series.options(), co = chart.options();
+  return {
+    up: so.upColor, down: so.downColor, borderUp: so.borderUpColor, borderDown: so.borderDownColor,
+    wickUp: so.wickUpColor, wickDown: so.wickDownColor,
+    bg: co.layout.background.color, margins: chart.priceScale('right').options().scaleMargins,
+  };
+});
+check('velas alcistas #7092be, bajistas #dadada', look.up === '#7092be' && look.down === '#dadada', JSON.stringify(look));
+check('borde y mecha del color del cuerpo',
+  look.borderUp === look.up && look.wickUp === look.up &&
+  look.borderDown === look.down && look.wickDown === look.down);
+check('fondo #363636', look.bg === '#363636', look.bg);
+check('margen superior del precio reducido', look.margins.top <= 0.08, JSON.stringify(look.margins));
+
+// 11. F2a — sensibilidad de la rueda (una muesca = CONFIG.wheelZoom)
+const zoomBefore = await page.evaluate(() => window.__test.chart.timeScale().getVisibleLogicalRange());
+await page.mouse.move(700, 400);
+await page.mouse.wheel(0, 100);
+await page.waitForTimeout(300);
+const zoomAfter = await page.evaluate(() => window.__test.chart.timeScale().getVisibleLogicalRange());
+const want = await page.evaluate(() => 1 + window.__test.CONFIG.wheelZoom);
+const ratio = (zoomAfter.to - zoomAfter.from) / (zoomBefore.to - zoomBefore.from);
+check('una muesca de rueda escala el rango visible', Math.abs(ratio - want) < 0.02,
+  `ratio=${ratio.toFixed(3)} esperado=${want}`);
+
+// 12. F2a — el autoajuste ignora los dibujos
+await page.evaluate(() => {
+  const { chart, getBars, TOOL_DEFS, addDrawing } = window.__test;
+  const bars = getBars();
+  window.__far = Math.max(...bars.map(b => b[2])) * 2;
+  addDrawing(TOOL_DEFS.hline.make('zz-autoscale-test', [{ time: bars.at(-1)[0], price: window.__far }]));
+  chart.priceScale('right').applyOptions({ autoScale: true });
+});
+await page.waitForTimeout(500);
+const visibleMax = () => {
+  const { chart, getBars } = window.__test;
+  const r = chart.timeScale().getVisibleLogicalRange();
+  const vis = getBars().slice(Math.max(0, Math.ceil(r.from)), Math.floor(r.to) + 1);
+  return Math.max(...vis.map(b => b[2]));
+};
+const auto = await page.evaluate((fn) => {
+  const { series, dm } = window.__test;
+  const r = { yFar: series.priceToCoordinate(window.__far),
+    yMax: series.priceToCoordinate(eval(`(${fn})`)()),
+    h: document.getElementById('chart').clientHeight };
+  dm.removeDrawing('zz-autoscale-test');
+  return r;
+}, visibleMax.toString());
+check('el autoajuste ignora los dibujos', auto.yFar === null || auto.yFar < 0, JSON.stringify(auto));
+check('el autoajuste sí encuadra las velas visibles', auto.yMax > 0 && auto.yMax < auto.h, JSON.stringify(auto));
+
+// 12b. control: con drawingsAutoscale=1 el dibujo SÍ debe estirar la escala.
+// Sin esto, 12 pasaría igual aunque el arreglo no hiciera nada.
+await page.evaluate(() => localStorage.setItem('cfg.drawingsAutoscale', '1'));
+await page.reload();
+await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
+const ctrl = await page.evaluate(() => {
+  const { chart, series, getBars, TOOL_DEFS, addDrawing, dm } = window.__test;
+  const bars = getBars();
+  const far = Math.max(...bars.map(b => b[2])) * 2;
+  addDrawing(TOOL_DEFS.hline.make('zz-autoscale-ctrl', [{ time: bars.at(-1)[0], price: far }]));
+  chart.priceScale('right').applyOptions({ autoScale: true });
+  return new Promise(res => setTimeout(() => {
+    const y = series.priceToCoordinate(far);
+    dm.removeDrawing('zz-autoscale-ctrl');
+    res({ y, h: document.getElementById('chart').clientHeight });
+  }, 500));
+});
+check('control: con la opción activada el dibujo sí estira la escala',
+  ctrl.y !== null && ctrl.y > 0 && ctrl.y < ctrl.h, JSON.stringify(ctrl));
+await page.evaluate(() => localStorage.removeItem('cfg.drawingsAutoscale'));
+await page.reload();
+await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
+
+// 13. F2a — barra de timeframes: una sola línea con scroll lateral
+await page.setViewportSize({ width: 720, height: 800 });
+await page.waitForTimeout(300);
+const tfbar = await page.evaluate(() => {
+  const el = window.__test.tfsEl;
+  const bs = [...el.querySelectorAll('button')];
+  const before = el.scrollLeft;
+  el.dispatchEvent(new WheelEvent('wheel', { deltaY: 300, bubbles: true, cancelable: true }));
+  return {
+    headerH: document.querySelector('header').offsetHeight,
+    unaLinea: bs[0].offsetTop === bs[bs.length - 1].offsetTop,
+    desborda: el.scrollWidth > el.clientWidth + 4,
+    scrollDelta: el.scrollLeft - before,
+  };
+});
+check('timeframes en una sola línea con ventana estrecha',
+  tfbar.unaLinea && tfbar.headerH < 45, JSON.stringify(tfbar));
+check('la rueda desplaza la barra de timeframes', tfbar.desborda && tfbar.scrollDelta > 0, JSON.stringify(tfbar));
+await page.setViewportSize({ width: 1400, height: 800 });
+
+// 14. F2a — barra de dibujo flotante: se arrastra y la posición persiste
+const grip = await page.locator('#toolsGrip').boundingBox();
+await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
+await page.mouse.down();
+await page.mouse.move(grip.x + 320, grip.y + 240, { steps: 10 });
+await page.mouse.up();
+await page.waitForTimeout(200);
+const moved = await page.evaluate(() => ({
+  left: window.__test.toolsEl.style.left, top: window.__test.toolsEl.style.top,
+  saved: localStorage.getItem('btcdash.toolbarPos'),
+}));
+check('barra de dibujo arrastrable', parseFloat(moved.left) > 250 && parseFloat(moved.top) > 200, JSON.stringify(moved));
+await page.reload();
+await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
+const kept = await page.evaluate(() => ({
+  left: window.__test.toolsEl.style.left, top: window.__test.toolsEl.style.top,
+}));
+check('posición de la barra persiste entre sesiones',
+  kept.left === moved.left && kept.top === moved.top, `${JSON.stringify(moved)} → ${JSON.stringify(kept)}`);
+await page.evaluate(() => localStorage.removeItem('btcdash.toolbarPos'));
+
 // limpieza: borra los dibujos de prueba de la BD
 for (const d of await (await fetch('http://127.0.0.1:8090/api/drawings')).json()) {
   await fetch(`http://127.0.0.1:8090/api/drawings/${d.id}`, { method: 'DELETE' });

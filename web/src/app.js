@@ -12,6 +12,29 @@ import {
 const $ = (sel) => document.querySelector(sel);
 const statusEl = $('#status');
 
+// ---------- configuración ----------
+// Ajustable en caliente sin recompilar, desde la consola del navegador:
+//   localStorage.setItem('cfg.wheelZoom', '0.45'); location.reload()
+const cfgNum = (k, def) => {
+  const v = parseFloat(localStorage.getItem(`cfg.${k}`));
+  return Number.isFinite(v) ? v : def;
+};
+const CONFIG = {
+  // Fracción del rango visible que se come cada muesca de rueda. LWC nativo
+  // mueve el barSpacing un 10% por muesca: hay que girar muchísimo.
+  wheelZoom: cfgNum('wheelZoom', 0.28),
+  // Márgenes de la escala de precio (fracción del alto). El defecto de LWC es
+  // top 0.2: demasiado aire sobre el precio.
+  priceMarginTop: cfgNum('priceMarginTop', 0.06),
+  priceMarginBottom: cfgNum('priceMarginBottom', 0.16),
+  volumeMarginTop: cfgNum('volumeMarginTop', 0.88),
+  // 0 = el autoajuste mira solo las velas; 1 = también los dibujos.
+  drawingsAutoscale: cfgNum('drawingsAutoscale', 0) === 1,
+};
+
+// Paleta de las velas: cuerpo, borde y mecha del mismo color (sin outline).
+const UP = '#7092be', DOWN = '#dadada';
+
 // ---------- timeframes ----------
 // Anclajes idénticos a los de la API: semanas/3D/5D sobre 2018-01-01 (lunes),
 // meses de calendario UTC. bucketStart() debe cuadrar con time_bucket().
@@ -66,27 +89,51 @@ const chart = createChart(container, {
   autoSize: true,
   layout: {
     attributionLogo: true, // obligación de la licencia Apache 2.0 (RF-5.6)
-    background: { color: '#0e1117' }, textColor: '#c9d1d9',
+    background: { color: '#363636' }, textColor: '#dadada',
   },
-  grid: { vertLines: { color: '#1b2129' }, horzLines: { color: '#1b2129' } },
+  grid: { vertLines: { color: 'rgba(255,255,255,.06)' }, horzLines: { color: 'rgba(255,255,255,.06)' } },
   timeScale: {
-    timeVisible: true, secondsVisible: false, borderColor: '#30363d',
+    timeVisible: true, secondsVisible: false, borderColor: '#4a4a4a',
     tickMarkFormatter: (t, type) => fmtTick(t, type),
   },
   localization: { timeFormatter: (t) => fmtFull(t) },
-  rightPriceScale: { borderColor: '#30363d' },
+  rightPriceScale: {
+    borderColor: '#4a4a4a',
+    scaleMargins: { top: CONFIG.priceMarginTop, bottom: CONFIG.priceMarginBottom },
+  },
   crosshair: { mode: 0 },
+  // El zoom de rueda lo hacemos nosotros (más abajo): el nativo es muy corto.
+  handleScale: { mouseWheel: false },
 });
 const series = chart.addSeries(CandlestickSeries, {
-  upColor: '#26a69a', downColor: '#ef5350', wickUpColor: '#26a69a',
-  wickDownColor: '#ef5350', borderVisible: false,
+  upColor: UP, downColor: DOWN, borderVisible: true,
+  borderUpColor: UP, borderDownColor: DOWN, wickUpColor: UP, wickDownColor: DOWN,
 });
 const volume = chart.addSeries(HistogramSeries, {
   priceScaleId: 'vol', priceFormat: { type: 'volume' }, lastValueVisible: false, priceLineVisible: false,
 });
-chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
+chart.priceScale('vol').applyOptions({ scaleMargins: { top: CONFIG.volumeMarginTop, bottom: 0 } });
 
-const volColor = (b) => b.close >= b.open ? 'rgba(38,166,154,.45)' : 'rgba(239,83,80,.45)';
+const volColor = (b) => b.close >= b.open ? 'rgba(112,146,190,.55)' : 'rgba(218,218,218,.35)';
+
+// Zoom de rueda propio: escala el rango lógico visible alrededor del cursor.
+// LWC solo ofrece handleScale.mouseWheel on/off (10% de barSpacing por
+// muesca), sin sensibilidad; con esto una muesca se come CONFIG.wheelZoom.
+container.addEventListener('wheel', (e) => {
+  if (e.ctrlKey) return;                                    // zoom del navegador
+  if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;      // desplazamiento lateral: lo lleva LWC
+  const ts = chart.timeScale();
+  const range = ts.getVisibleLogicalRange();
+  if (!range) return;
+  e.preventDefault();
+  const notches = Math.max(-3, Math.min(3, e.deltaMode === 1 ? e.deltaY / 3 : e.deltaY / 100));
+  const span = range.to - range.from;
+  const newSpan = Math.max(6, Math.min(span * Math.pow(1 + CONFIG.wheelZoom, notches), 5e6));
+  const width = ts.width() || container.clientWidth;
+  const frac = Math.min(1, Math.max(0, (e.clientX - container.getBoundingClientRect().left) / width));
+  const anchor = range.from + frac * span;
+  ts.setVisibleLogicalRange({ from: anchor - frac * newSpan, to: anchor + (1 - frac) * newSpan });
+}, { passive: false });
 const toCandle = ([t, o, h, l, c]) => ({ time: t, open: o, high: h, low: l, close: c });
 const toVol = ([t, , , , , v], row) => ({ time: t, value: v, color: volColor(row ?? { open: 0, close: 1 }) });
 
@@ -185,6 +232,16 @@ function connectWS() {
 const dm = new DrawingManager();
 dm.attach(chart, series, container);
 
+// El autoajuste de la escala debe mirar SOLO las velas: un rectángulo en 100k
+// no puede forzar un zoom out al pulsar "auto". Cada dibujo del plugin es a la
+// vez la primitive que LWC consulta y su clase base devuelve el rango de sus
+// anclas en autoscaleInfo(); se anula por instancia al añadirlo.
+function addDrawing(d) {
+  if (!CONFIG.drawingsAutoscale) d.autoscaleInfo = () => null;
+  dm.addDrawing(d);
+  return d;
+}
+
 const zoneRegistry = new Map(); // lineId -> {zoneId, role:'a'|'b', siblingId}
 const zones = new Map();        // zoneId -> {time, a:{price,...}, b:{price,...}}
 let shiftDown = false;
@@ -223,7 +280,7 @@ function zoneLine(zoneId, role, time, spec) {
   // precio en el tiempo. Con el objeto anchor no hay ambigüedad.
   const line = new HorizontalRay(id, [{ time, price: spec.price }],
     { color: spec.color, lineWidth: spec.lineWidth }, { direction: 'right', showPrice: true });
-  dm.addDrawing(line);
+  addDrawing(line);
   zoneRegistry.set(id, { zoneId, role, siblingId: `${zoneId}:${role === 'a' ? 'b' : 'a'}` });
   return line;
 }
@@ -317,7 +374,7 @@ chart.subscribeClick((param) => {
   const d = def.make(id, pendingPoints);
   setTool(null);
   if (!d) return;
-  dm.addDrawing(d);
+  addDrawing(d);
   dm.selectDrawing(id);
   persistDrawing(id, { kind: 'plugin', data: d.toJSON() });
 });
@@ -350,7 +407,7 @@ function restorePlugin(data) {
   if (!cls) return;
   const d = new cls(data.id);
   d.fromJSON(data);
-  dm.addDrawing(d);
+  addDrawing(d);
 }
 
 async function loadDrawings() {
@@ -379,6 +436,74 @@ document.querySelectorAll('.tools button').forEach(b => {
   };
 });
 
+// La barra de timeframes es de UNA línea: lo que no cabe se desplaza con la
+// rueda o arrastrando. El arrastre no debe disparar el click del botón.
+let tfDrag = null, tfDragged = false;
+tfsEl.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  tfsEl.scrollLeft += Math.abs(e.deltaY) > Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+}, { passive: false });
+tfsEl.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  tfDrag = { x: e.clientX, left: tfsEl.scrollLeft };
+  tfDragged = false;
+  addEventListener('pointermove', onTfMove);
+  addEventListener('pointerup', onTfUp);
+});
+function onTfMove(e) {
+  const dx = e.clientX - tfDrag.x;
+  if (!tfDragged && Math.abs(dx) > 3) { tfDragged = true; tfsEl.classList.add('dragging'); }
+  if (tfDragged) tfsEl.scrollLeft = tfDrag.left - dx;
+}
+function onTfUp() {
+  removeEventListener('pointermove', onTfMove);
+  removeEventListener('pointerup', onTfUp);
+  tfDrag = null; tfsEl.classList.remove('dragging');
+}
+tfsEl.addEventListener('click', (e) => {
+  if (tfDragged) { e.stopPropagation(); e.preventDefault(); tfDragged = false; }
+}, true);
+
+// ---------- barra de dibujo flotante ----------
+// Arrastrable por el asa y con la posición guardada entre sesiones.
+const toolsEl = $('#tools'), gripEl = $('#toolsGrip');
+const TOOLBAR_KEY = 'btcdash.toolbarPos';
+function placeToolbar(x, y) {
+  const r = toolsEl.getBoundingClientRect();
+  const pos = {
+    x: Math.max(0, Math.min(x, innerWidth - r.width)),
+    y: Math.max(0, Math.min(y, innerHeight - r.height)),
+  };
+  toolsEl.style.left = `${pos.x}px`;
+  toolsEl.style.top = `${pos.y}px`;
+  return pos;
+}
+try {
+  const saved = JSON.parse(localStorage.getItem(TOOLBAR_KEY) || 'null');
+  if (saved) placeToolbar(saved.x, saved.y);
+} catch { /* posición corrupta: se queda la de por defecto */ }
+
+gripEl.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  const r = toolsEl.getBoundingClientRect();
+  const dx = e.clientX - r.left, dy = e.clientY - r.top;
+  toolsEl.classList.add('dragging');
+  const move = (ev) => placeToolbar(ev.clientX - dx, ev.clientY - dy);
+  const up = (ev) => {
+    removeEventListener('pointermove', move);
+    removeEventListener('pointerup', up);
+    toolsEl.classList.remove('dragging');
+    localStorage.setItem(TOOLBAR_KEY, JSON.stringify(placeToolbar(ev.clientX - dx, ev.clientY - dy)));
+  };
+  addEventListener('pointermove', move);
+  addEventListener('pointerup', up);
+});
+addEventListener('resize', () => {
+  const r = toolsEl.getBoundingClientRect();
+  placeToolbar(r.left, r.top); // que no se quede fuera al encoger la ventana
+});
+
 // ---------- arranque ----------
 (async () => {
   await loadTF(tf);
@@ -388,4 +513,5 @@ document.querySelectorAll('.tools button').forEach(b => {
 
 // hooks de test (DST, streaming) — sin efecto en producción
 window.__test = { bucketStart, fmtTick, fmtFull, TFS, dm, loadTF, chart, series,
-  getBars: () => bars, getTF: () => tf, setTool, zones };
+  getBars: () => bars, getTF: () => tf, setTool, zones, CONFIG, tfsEl, toolsEl,
+  TOOL_DEFS, addDrawing };
