@@ -145,11 +145,12 @@ Si LWC v5 + plugin de dibujo resulta inviable (drag/hit-testing inestable, rendi
 - **RF-5.4** Herramientas de dibujo mínimas: línea horizontal, línea de tendencia, rectángulo/zona, texto, medición
 - **RF-5.5** Los dibujos persisten al cambiar de timeframe y entre sesiones
 - **RF-5.6** Atribución a TradingView visible (`attributionLogo: true`) — obligación de la licencia Apache 2.0
-- **RF-5.7** (F2a) Paleta: velas alcistas `#7092be`, bajistas `#dadada`, fondo `#363636`; cuerpo, borde y mecha del mismo color (sin outline)
+- **RF-5.7** (F2a/F2b) Paleta: velas alcistas `#7092be`, bajistas `#dadada`, fondo `#363636`; cuerpo, borde y mecha del mismo color (sin outline). Sin rejilla, crosshair sólido de 1 px en `#1e1e1e`, y sin indicador de volumen en el gráfico
 - **RF-5.8** (F2a) La barra de timeframes ocupa **una sola línea** siempre; lo que no cabe se desplaza lateralmente (rueda y arrastre), nunca se parte en dos filas
 - **RF-5.9** (F2a) La barra de herramientas de dibujo es **flotante y arrastrable** (puede superponerse a la de timeframes) y su posición persiste entre sesiones
 - **RF-5.10** (F2a) El autoajuste de la escala de precio mira **solo las velas**: los dibujos no lo estiran (se anula `autoscaleInfo` de cada primitive)
-- **RF-5.11** (F2a) Sensibilidad de la rueda y márgenes de la escala **configurables** (`CONFIG` en `web/src/app.js`, ajustable en caliente por `localStorage`)
+- **RF-5.11** (F2a/F2b) Sensibilidad de la rueda y márgenes de la escala **configurables** (`CONFIG` en `web/src/app.js`, ajustable en caliente desde la consola con `cfg.set()` / `cfg.reset()`)
+- **RF-5.12** (F2b) El bundle se sirve con hash de contenido en el nombre (`app.<hash>.js`) y el HTML con `Cache-Control: no-cache`: un deploy se ve sin recargas forzadas ni ventanas de incógnito
 
 ### RF-6 — Operación
 
@@ -285,6 +286,7 @@ CREATE TABLE drawings (
 | **F1e** | (absorbida por F1c)                                                                           | —             |
 | **F1f** | Infra: Hetzner, Cloudflare Tunnel/Access, backups, monitorización                             | 12-20         |
 | **F2a** | ✅ HECHO — Arreglo de las 6 CAggs sin histórico (trampa 13) + ajustes de frontend (paleta, barras, zoom, autoescala) | 4-6 |
+| **F2b** | ✅ HECHO — Bundle con hash (la caché tapaba F2a), sin volumen ni rejilla, crosshair fino, y tests que miran los píxeles pintados | 2-3 |
 |         | **Total Fase 1**                                                                              | **135-232 h** |
 
 Fases posteriores (indicadores, volume profile, CVD, alertas, replay): 60-120 h según alcance.

@@ -325,16 +325,17 @@ Aborta si `~/btcdash/collector/.env` no existe o no define `HEALTHCHECK_URL`
 (§0 y §5), excluye `.env`, `webdist/` y `data/` del rsync, y al terminar
 comprueba `/health` y `/api/health`, avisando si `healthcheck_ping` es `false`.
 
-**Ajustes de interfaz (F2a).** Paleta fija en `web/src/app.js`: velas
-`#7092be`/`#dadada` con borde y mecha del color del cuerpo, fondo `#363636`.
-Lo regulable vive en el objeto `CONFIG` de ese fichero y se puede tocar en
-caliente desde la consola del navegador sin recompilar:
+**Ajustes de interfaz (F2a/F2b).** Paleta fija en `web/src/app.js`: velas
+`#7092be`/`#dadada` con borde y mecha del color del cuerpo, fondo `#363636`,
+sin rejilla, crosshair sólido de 1 px en `#1e1e1e` y sin indicador de volumen.
+Lo regulable vive en el objeto `CONFIG` y se toca desde la consola del
+navegador sin recompilar, con el helper `cfg`:
 
 ```js
-localStorage.setItem('cfg.wheelZoom', '0.45')        // 0.28: fracción del rango visible por muesca
-localStorage.setItem('cfg.priceMarginTop', '0.10')   // 0.06: aire sobre el precio
-localStorage.setItem('cfg.drawingsAutoscale', '1')   // 0: el autoajuste ignora los dibujos
-location.reload()
+cfg.list()                   // qué hay en vigor ahora mismo
+cfg.set('wheelZoom', 0.25)   // 0.18 por defecto: fracción del rango visible por muesca
+cfg.set('priceMarginTop', 0.10)
+cfg.reset()                  // borra TODOS los ajustes locales y recarga
 ```
 
 El zoom de rueda es propio (LWC solo ofrece on/off y mueve un 10% de
@@ -342,6 +343,21 @@ El zoom de rueda es propio (LWC solo ofrece on/off y mueve un 10% de
 El autoajuste ignora los dibujos anulando el `autoscaleInfo` de cada primitive
 del plugin, que por defecto devuelve el rango de sus anclas. La posición de la
 barra de dibujo flotante se guarda en `localStorage['btcdash.toolbarPos']`.
+
+**Caché del bundle (F2b).** Un deploy no se veía hasta abrir una ventana de
+incógnito: el fichero nuevo estaba en el servidor —el `grep` lo confirmaba—
+pero el navegador seguía sirviendo su copia de `app.js`, la misma URL de
+siempre y sin cabeceras que dijeran nada. Ahora `npm run build` escribe
+`app.<hash>.js` e `index.html` apunta a esa URL, así que cada versión es un
+fichero distinto; la API sirve el HTML con `Cache-Control: no-cache,
+must-revalidate`, los bundles con hash como `immutable` y las respuestas JSON
+con `no-store` (sin validadores, un navegador puede cachear un GET por
+heurística y servir velas viejas). Para comprobar qué versión está viendo el
+navegador basta mirar el `src` del `<script>` en el HTML servido:
+
+```bash
+curl -s http://127.0.0.1:8080/ | grep -o 'src="[^"]*"'
+```
 
 ## 7c. Cifras con el histórico completo cargado (2026-08-21, cierre F1b)
 
