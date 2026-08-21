@@ -326,16 +326,79 @@ func (s *PG) UpsertOfficial1m(ctx context.Context, symbol string, ks []Official1
 	return nil
 }
 
-// RefreshCAggs refresca los continuous aggregates >=5m sobre un rango (tras
-// un backfill). Cada CALL va en autocommit: no puede ir en transacción.
+// CAgg describe una continuous aggregate y el tamaño de su bucket.
+type CAgg struct {
+	View   string
+	Bucket time.Duration
+}
+
+// CAggs: TODAS las continuous aggregates materializadas. Esta lista es la
+// única fuente de verdad; si se añade una CAgg en una migración hay que
+// añadirla aquí, o quedará sin materializar el histórico (bug de F2a: las
+// seis de la migración 004 nunca se refrescaron y solo tenían la ventana de
+// su política automática, 3-7 días, mientras las cinco de la 002 sí estaban
+// en esta lista y tenían el histórico completo).
+var CAggs = []CAgg{
+	{"candles_3m", 3 * time.Minute},
+	{"candles_5m", 5 * time.Minute},
+	{"candles_15m", 15 * time.Minute},
+	{"candles_30m", 30 * time.Minute},
+	{"candles_1h", time.Hour},
+	{"candles_2h", 2 * time.Hour},
+	{"candles_4h", 4 * time.Hour},
+	{"candles_6h", 6 * time.Hour},
+	{"candles_8h", 8 * time.Hour},
+	{"candles_12h", 12 * time.Hour},
+	{"candles_1d", 24 * time.Hour},
+}
+
+// RefreshChunk: tamaño del tramo de cada CALL. Acota el hash aggregate del
+// refresco (mem_limit de 768 MB en el contenedor de TimescaleDB); 90 días de
+// candles_1m son ~130k filas de entrada.
+const RefreshChunk = 90 * 24 * time.Hour
+
+// RefreshCAggs refresca todas las continuous aggregates sobre un rango, por
+// tramos. Cada CALL va en autocommit: no puede ir en transacción.
 func (s *PG) RefreshCAggs(ctx context.Context, from, to time.Time) error {
-	for _, view := range []string{"candles_5m", "candles_15m", "candles_1h", "candles_4h", "candles_1d"} {
-		// Casts explícitos: los argumentos de la procedure son de tipo "any"
-		// y el protocolo extendido no puede inferir $1/$2 sin ellos (42P18).
-		if _, err := s.Pool.Exec(ctx,
-			fmt.Sprintf(`CALL refresh_continuous_aggregate('%s', $1::timestamptz, $2::timestamptz)`, view), from, to); err != nil {
-			return fmt.Errorf("refresh %s: %w", view, err)
+	for _, ca := range CAggs {
+		if err := s.RefreshCAgg(ctx, ca, from, to); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// RefreshCAgg refresca una CAgg por tramos de RefreshChunk. El final se
+// recorta al inicio del bucket en curso: materializar un bucket incompleto lo
+// congelaría (por encima de la marca de agua deja de servirse en tiempo real)
+// hasta el siguiente pase de su política.
+func (s *PG) RefreshCAgg(ctx context.Context, ca CAgg, from, to time.Time) error {
+	if lim := time.Now().UTC().Truncate(ca.Bucket); to.After(lim) {
+		to = lim
+	}
+	from = from.UTC().Truncate(ca.Bucket)
+	for start := from; start.Before(to); start = start.Add(RefreshChunk) {
+		end := start.Add(RefreshChunk)
+		if end.After(to) {
+			end = to
+		}
+		// Casts explícitos: los argumentos de la procedure son de tipo "any"
+		// y el protocolo extendido no puede inferir $1/$2 sin ellos (42P18).
+		if _, err := s.Pool.Exec(ctx,
+			fmt.Sprintf(`CALL refresh_continuous_aggregate('%s', $1::timestamptz, $2::timestamptz)`, ca.View),
+			start, end); err != nil {
+			return fmt.Errorf("refresh %s [%s, %s): %w", ca.View,
+				start.Format(time.RFC3339), end.Format(time.RFC3339), err)
+		}
+	}
+	return nil
+}
+
+// TableRange: filas y rango temporal de una tabla o CAgg. `table` sale
+// siempre de listas nuestras (store.CAggs), nunca de entrada externa.
+func (s *PG) TableRange(ctx context.Context, table string) (n int64, first, last time.Time, err error) {
+	err = s.Pool.QueryRow(ctx, fmt.Sprintf(
+		`SELECT count(*), coalesce(min(ts), 'epoch'), coalesce(max(ts), 'epoch') FROM %s`, table),
+	).Scan(&n, &first, &last)
+	return n, first.UTC(), last.UTC(), err
 }

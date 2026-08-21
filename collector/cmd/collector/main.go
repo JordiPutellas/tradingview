@@ -2,9 +2,11 @@
 //
 // Subcomandos:
 //
-//	run       migra y arranca el colector (por defecto)
-//	migrate   aplica migraciones y sale
-//	backfill  puebla histórico desde data.binance.vision: -from/-to (YYYY-MM-DD)
+//	run            migra y arranca el colector (por defecto)
+//	migrate        aplica migraciones y sale
+//	backfill       puebla histórico desde data.binance.vision: -from/-to (YYYY-MM-DD)
+//	refresh-caggs  rematerializa todas las CAggs sobre un rango (-from/-to)
+//	coverage       imprime el rango que sirve cada timeframe
 package main
 
 import (
@@ -14,9 +16,11 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"jputellas.dev/btcdash/collector/internal/api"
 	"jputellas.dev/btcdash/collector/internal/backfill"
 	"jputellas.dev/btcdash/collector/internal/binance"
 	"jputellas.dev/btcdash/collector/internal/collect"
@@ -98,7 +102,7 @@ func dispatch(cmd string, args []string) error {
 		if err := store.Migrate(ctx, pg.Pool); err != nil {
 			return err
 		}
-		yesterday := time.Now().UTC().Truncate(24 * time.Hour).AddDate(0, 0, -1)
+		yesterday := time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, -1)
 		to := yesterday
 		if *toS != "" {
 			if to, err = time.Parse("2006-01-02", *toS); err != nil {
@@ -119,6 +123,37 @@ func dispatch(cmd string, args []string) error {
 			}
 		}
 		return backfill.RunT1(ctx, pg, binance.NewREST(cfg.FapiBaseURL, cfg.Symbol), cfg.Symbol, from, to, *cache)
+	case "refresh-caggs":
+		fs := flag.NewFlagSet("refresh-caggs", flag.ExitOnError)
+		fromS := fs.String("from", "2019-09-08", "primer día UTC (YYYY-MM-DD)")
+		toS := fs.String("to", "", "fin exclusivo (YYYY-MM-DD); por defecto, ahora")
+		only := fs.String("only", "", "vistas separadas por coma; por defecto, todas")
+		fs.Parse(args)
+		from, err := time.Parse("2006-01-02", *fromS)
+		if err != nil {
+			return fmt.Errorf("-from: %w", err)
+		}
+		to := time.Now().UTC()
+		if *toS != "" {
+			if to, err = time.Parse("2006-01-02", *toS); err != nil {
+				return fmt.Errorf("-to: %w", err)
+			}
+		}
+		var views []string
+		if *only != "" {
+			views = strings.Split(*only, ",")
+		}
+		return backfill.RefreshCAggs(ctx, pg, from, to, views)
+	case "coverage":
+		cov, err := api.Coverage(ctx, pg.Pool, cfg.Symbol)
+		if err != nil {
+			return err
+		}
+		for _, c := range cov {
+			fmt.Printf("%-4s %-11s %s → %s\n", c.TF, c.Src,
+				tstamp(c.First), tstamp(c.Last))
+		}
+		return nil
 	case "resolve-gaps":
 		fs := flag.NewFlagSet("resolve-gaps", flag.ExitOnError)
 		cache := fs.String("cache", "data/bulk-cache", "directorio de caché de ZIPs")
@@ -133,8 +168,15 @@ func dispatch(cmd string, args []string) error {
 		}
 		return run(ctx, cfg, pg)
 	default:
-		return fmt.Errorf("unknown command %q (run|migrate|backfill|backfill-1m|t1|resolve-gaps)", cmd)
+		return fmt.Errorf("unknown command %q (run|migrate|backfill|backfill-1m|t1|resolve-gaps|refresh-caggs|coverage)", cmd)
 	}
+}
+
+func tstamp(epoch int64) string {
+	if epoch == 0 {
+		return "(vacío)"
+	}
+	return time.Unix(epoch, 0).UTC().Format("2006-01-02 15:04")
 }
 
 func run(ctx context.Context, cfg config.Config, pg *store.PG) error {
