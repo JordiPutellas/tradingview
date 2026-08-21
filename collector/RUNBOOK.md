@@ -220,6 +220,43 @@ está demostrado con prueba real):
 SELECT drop_chunks('candles_1s', older_than => '2027-01-01'::timestamptz);
 ```
 
+## 6c. API y frontend (F1c)
+
+Servicio `api` en el compose (misma imagen, `entrypoint: ["api"]`), en
+`127.0.0.1:8080` — el puerto al que el túnel YA apuntaba, así que cloudflared
+no se tocó (la tarea original preveía cambiar su config: no hizo falta, el
+ingress ya era `http://127.0.0.1:8080` con IP explícita). El contenedor
+`placeholder` quedó parado tras el reinicio de kernel (corría sin política de
+restart) y se eliminó.
+
+- Endpoints: `GET /api/candles?tf=&from=&to=&limit=` (filas `[t,o,h,l,c,v]`
+  ascendentes, cap 20k, epoch UTC), `GET /api/timeframes`, `GET /api/ws`
+  (push de la vela en curso vía LISTEN/NOTIFY del colector, ~3/s),
+  CRUD `/api/drawings/{id}`, estáticos del frontend en `/`.
+- Deploy del frontend: `cd web && npm run build` y
+  `rsync -az --delete web/dist/ jordios:~/btcdash/collector/webdist/`
+  (montado read-only en el contenedor api). El deploy del colector NO debe
+  tocar `webdist/` (`--exclude webdist/`).
+- Timeframes al vuelo: sub-minuto desde `candles_1s`; 45m/3h desde `candles_1m`;
+  ≥3D desde `candles_1d` con `time_bucket` (semanas ancladas a lunes con
+  origin 2018-01-01; meses de calendario UTC). El frontend replica los mismos
+  anclajes para el streaming (verificado por test).
+- **Patrón de lecturas medido** (el punto de RAM abierto en F1b): query típica
+  de 20k velas de 1s → 0,40 s; peor caso permitido (45s agregado desde 1s,
+  20k barras ≈ 2,6M filas) → 5,8 s con +44 MiB transitorios en TimescaleDB
+  (365/768 MiB). Sin riesgo de OOM. Si 45s/sub-minuto se vuelven lentos en el
+  uso real, la vía es materializar esas CAggs, no subir RAM.
+- Tests del frontend: `cd web && node app-test.mjs` (headless, contra la API;
+  requiere `npx playwright install chromium`). Cubre carga, DST
+  marzo/octubre Europe/Madrid, anclajes cliente=API, lazy-loading, streaming
+  vivo, dibujos (crear/arrastrar/persistir/recargar) y la zona de dos niveles.
+- Peculiaridad de LWC: dos clicks casi simultáneos en el mismo píxel se
+  absorben (detector de doble click) — irrelevante en uso real, relevante en
+  tests sintéticos.
+- **Pendiente de verificación del usuario**: WS a través del túnel con
+  sesión de Access real (todo lo demás está verificado por dentro; el borde
+  responde con el 302 de Access correcto).
+
 ## 7c. Cifras con el histórico completo cargado (2026-08-21, cierre F1b)
 
 Medición con 2 años de 1s + 7 años de 1m cargados y el colector ingiriendo:

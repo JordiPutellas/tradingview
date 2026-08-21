@@ -49,9 +49,11 @@ Dashboard de gráficos de Bitcoin auto-alojado, de uso personal, orientado al **
 | Base de datos         | **TimescaleDB**                              | Continuous aggregates, ecosistema Postgres, compresión nativa                     |
 | Hosting               | **Hetzner** (~4-5 €/mes, UE)                 | Oracle Free recortado y con terminación automática desde 18-ago-2026              |
 | Exposición            | **Cloudflare Tunnel + Access**               | Gratis, soporta WebSockets, sin abrir puertos                                     |
-| Frontend              | Cloudflare Pages                             | Estático, gratis                                                                  |
+| Frontend              | ~~Cloudflare Pages~~ → **VPS, servido por la API** (decisión F1c, ver fila "Hosting frontend") | Mismo origen y un solo deploy |
 | Retención 1s          | **Infinita** (decisión 2026-08-20)           | Comprimir sí, borrar no: ~2,7 GB/año con 27 GB libres, y el usuario revisa operaciones antiguas. Purga manual documentada en el RUNBOOK por si acaso |
-| Estrategia gráfico    | Directo a LWC, **sin prototipo comparativo** | Plan B documentado, no ejecutado                                                  |
+| Estrategia gráfico    | Directo a LWC, **sin prototipo comparativo** | Validado en spike F1c: 82k velas de 1s a 60 FPS de pan/zoom (suelo conservador en headless). Plan B descartado |
+| Plugin de dibujo      | **lightweight-charts-drawing** (MIT, v5)     | Validado en spike: drag, serialización JSON, 68 herramientas. `difurious/line-tools` está deprecado (v3.8). La zona de dos niveles se compone con 2 `HorizontalRay` enlazados — sin primitives custom |
+| Hosting frontend      | **VPS, servido por la propia API** (no Cloudflare Pages) | Mismo origen (sin CORS), una sola app de Access cubre API+frontend, el WS va al mismo host por el túnel existente, y un único deploy |
 
 ### Plan B (documentado, no activado)
 
@@ -271,9 +273,9 @@ CREATE TABLE drawings (
 | **F0**  | ✅ HECHO — Spike de validación (veredicto positivo con caveats; ver `spike/f0/RESULTADOS.md`) | 8-12          |
 | **F1a** | Colector Go: WS + reconexión + reconciliación + TimescaleDB                                   | 40-70         |
 | **F1b** | Backfill histórico + job T+1 de corrección exacta (RF-7.1) + sobreescritura ≥1m (RF-7.2)      | 12-20         |
-| **F1c** | API (REST + WS)                                                                               | 15-25         |
-| **F1d** | Frontend LWC: velas, timeframes, streaming, lazy-loading                                      | 30-50         |
-| **F1e** | Integración del plugin de dibujo + persistencia                                               | 20-40         |
+| **F1c** | ✅ HECHO — API (REST+WS+dibujos) + frontend LWC completo + despliegue tras el túnel (queda la verificación visual del usuario en btc.jputellas.dev) | 15-25 |
+| **F1d** | (absorbida por F1c)                                                                           | —             |
+| **F1e** | (absorbida por F1c)                                                                           | —             |
 | **F1f** | Infra: Hetzner, Cloudflare Tunnel/Access, backups, monitorización                             | 12-20         |
 |         | **Total Fase 1**                                                                              | **135-232 h** |
 
