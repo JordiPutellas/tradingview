@@ -4,6 +4,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -74,31 +75,35 @@ func OpenPG(ctx context.Context, url string) (*PG, error) {
 	return &PG{Pool: pool}, nil
 }
 
-const upsertSQL = `INSERT INTO candles_1s
-  (ts, symbol, open, high, low, close, volume, buy_volume, trade_count, agg_count, first_agg_id, last_agg_id, quality)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-ON CONFLICT (symbol, ts) DO UPDATE SET
+// UpsertCandles hace upserts multi-fila (500 velas por INSERT): un orden de
+// magnitud más rápido que fila a fila, decisivo para el backfill de 2 años.
+func (s *PG) UpsertCandles(ctx context.Context, cs []StoredCandle) error {
+	const cols = 13
+	const chunkSize = 500 // 500*13 = 6500 parámetros, muy por debajo del límite de 65535
+	for start := 0; start < len(cs); start += chunkSize {
+		chunk := cs[start:min(start+chunkSize, len(cs))]
+		var sb strings.Builder
+		sb.WriteString(`INSERT INTO candles_1s
+  (ts, symbol, open, high, low, close, volume, buy_volume, trade_count, agg_count, first_agg_id, last_agg_id, quality) VALUES `)
+		args := make([]any, 0, len(chunk)*cols)
+		for i, c := range chunk {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			base := i * cols
+			fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+				base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8, base+9, base+10, base+11, base+12, base+13)
+			args = append(args, time.Unix(c.TsSec, 0).UTC(), c.Symbol,
+				c.Open, c.High, c.Low, c.Close, c.Volume, c.BuyVolume,
+				c.TradeCount, c.AggCount, c.FirstAggID, c.LastAggID, c.Quality)
+		}
+		sb.WriteString(` ON CONFLICT (symbol, ts) DO UPDATE SET
   open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low, close=EXCLUDED.close,
   volume=EXCLUDED.volume, buy_volume=EXCLUDED.buy_volume,
   trade_count=EXCLUDED.trade_count, agg_count=EXCLUDED.agg_count,
   first_agg_id=EXCLUDED.first_agg_id, last_agg_id=EXCLUDED.last_agg_id,
-  quality=EXCLUDED.quality`
-
-func (s *PG) UpsertCandles(ctx context.Context, cs []StoredCandle) error {
-	if len(cs) == 0 {
-		return nil
-	}
-	batch := &pgx.Batch{}
-	for _, c := range cs {
-		batch.Queue(upsertSQL,
-			time.Unix(c.TsSec, 0).UTC(), c.Symbol,
-			c.Open, c.High, c.Low, c.Close, c.Volume, c.BuyVolume,
-			c.TradeCount, c.AggCount, c.FirstAggID, c.LastAggID, c.Quality)
-	}
-	br := s.Pool.SendBatch(ctx, batch)
-	defer br.Close()
-	for range cs {
-		if _, err := br.Exec(); err != nil {
+  quality=EXCLUDED.quality`)
+		if _, err := s.Pool.Exec(ctx, sb.String(), args...); err != nil {
 			return fmt.Errorf("upsert candles: %w", err)
 		}
 	}
@@ -311,8 +316,10 @@ func (s *PG) UpsertOfficial1m(ctx context.Context, symbol string, ks []Official1
 // un backfill). Cada CALL va en autocommit: no puede ir en transacción.
 func (s *PG) RefreshCAggs(ctx context.Context, from, to time.Time) error {
 	for _, view := range []string{"candles_5m", "candles_15m", "candles_1h", "candles_4h", "candles_1d"} {
+		// Casts explícitos: los argumentos de la procedure son de tipo "any"
+		// y el protocolo extendido no puede inferir $1/$2 sin ellos (42P18).
 		if _, err := s.Pool.Exec(ctx,
-			fmt.Sprintf(`CALL refresh_continuous_aggregate('%s', $1, $2)`, view), from, to); err != nil {
+			fmt.Sprintf(`CALL refresh_continuous_aggregate('%s', $1::timestamptz, $2::timestamptz)`, view), from, to); err != nil {
 			return fmt.Errorf("refresh %s: %w", view, err)
 		}
 	}
