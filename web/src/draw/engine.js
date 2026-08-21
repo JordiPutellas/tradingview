@@ -1,0 +1,599 @@
+// Motor de dibujos propio sobre la API de primitives de LWC v5.
+//
+// Por qué propio y no el plugin (justificación larga en el README): el plugin
+// escuchaba el ratón DESPUÉS que el gráfico, así que al arrastrar en
+// horizontal quien se movía era el gráfico. Aquí los eventos se capturan en
+// fase de CAPTURA sobre el contenedor y, cuando el gesto es nuestro, se corta
+// la propagación: LWC no llega a enterarse y no puede desplazar nada.
+//
+// El modelo guarda (tiempo UTC absoluto, precio) — NUNCA índices de barra —
+// y la conversión a pantalla pasa por el índice lógico, extrapolando fuera
+// del rango de datos para poder dibujar a la derecha de la última vela.
+import { TYPES, DEFAULT_STYLE, drawHandles, drawSelection } from './shapes.js';
+import { HANDLE, dist, rgba, fmtDuration, fmtPrice } from './geom.js';
+
+const PERSIST_MS = 400;
+const uuid = () => crypto.randomUUID();
+
+export class DrawEngine {
+  constructor({ chart, series, container, getBars, getStep, onSave, onDelete, onSelect, autoscaleWithShapes }) {
+    this.chart = chart;
+    this.series = series;
+    this.container = container;
+    this.getBars = getBars;                 // () => filas [t,o,h,l,c,v]
+    this.getStep = getStep;                 // () => segundos por vela del TF
+    this.onSave = onSave || (() => {});
+    this.onDelete = onDelete || (() => {});
+    this.onSelect = onSelect || (() => {});
+    this.autoscaleWithShapes = autoscaleWithShapes || (() => false);
+
+    this.shapes = [];
+    this.selectedId = null;
+    this.activeLine = 0;                    // en zone2, qué línea edita el panel
+    this.pending = null;                    // creación en curso
+    this.drag = null;
+    this.measure = null;                    // {from:{time,price}, to, fixed}
+    this.hover = null;
+    this.cursor = null;                     // último (x,y) del ratón en el panel
+    this.timers = new Map();
+    this.requestUpdate = null;
+    this._paneRect = null;
+
+    this._installPrimitive();
+    this._installEvents();
+  }
+
+  // ---------- conversión (tiempo, precio) <-> pantalla ----------
+  // Se pasa por el índice lógico porque timeToCoordinate solo resuelve
+  // tiempos que existen en los datos: con esto un dibujo puede vivir entre
+  // dos velas o a la derecha de la última.
+  logicalOf(time) {
+    const b = this.getBars();
+    const n = b.length;
+    if (!n) return null;
+    const step = this.getStep();
+    if (time <= b[0][0]) return -((b[0][0] - time) / step);
+    if (time >= b[n - 1][0]) return (n - 1) + (time - b[n - 1][0]) / step;
+    let lo = 0, hi = n - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (b[mid][0] <= time) lo = mid; else hi = mid;
+    }
+    const span = (b[hi][0] - b[lo][0]) || step;
+    return lo + (time - b[lo][0]) / span;
+  }
+
+  timeOfLogical(l) {
+    const b = this.getBars();
+    const n = b.length;
+    if (!n) return null;
+    const step = this.getStep();
+    if (l <= 0) return Math.round(b[0][0] + l * step);
+    if (l >= n - 1) return Math.round(b[n - 1][0] + (l - (n - 1)) * step);
+    const i = Math.floor(l), f = l - i;
+    return Math.round(b[i][0] + f * ((b[i + 1][0] - b[i][0]) || step));
+  }
+
+  xOf(time) {
+    const l = this.logicalOf(time);
+    return l === null ? null : this.chart.timeScale().logicalToCoordinate(l);
+  }
+
+  timeOfX(x) {
+    const l = this.chart.timeScale().coordinateToLogical(x);
+    return l === null ? null : this.timeOfLogical(l);
+  }
+
+  yOf(price) { return this.series.priceToCoordinate(price); }
+  priceOfY(y) { return this.series.coordinateToPrice(y); }
+
+  screenPoints(s) {
+    const out = [];
+    for (const p of s.points) {
+      const x = this.xOf(p.t), y = this.yOf(p.p);
+      if (x === null || y === null) return null;
+      out.push({ x, y });
+    }
+    return out;
+  }
+
+  // ---------- primitive ----------
+  _installPrimitive() {
+    const self = this;
+    const paneView = {
+      zOrder: () => 'top',
+      renderer: () => ({
+        draw(target) {
+          target.useMediaCoordinateSpace(({ context, mediaSize }) => {
+            self._paint(context, mediaSize);
+          });
+        },
+      }),
+    };
+    this._paneViews = [paneView];
+    this._axisViews = [];
+
+    this.primitive = {
+      attached: (p) => { self.requestUpdate = p.requestUpdate; },
+      detached: () => { self.requestUpdate = null; },
+      updateAllViews: () => {},
+      // Los dibujos NO estiran la escala: al pulsar AUTO solo mandan las
+      // velas (RF-5.10). Queda la palanca para poder demostrar en el test que
+      // la primitive SÍ está siendo consultada — si no, el check pasaría
+      // igual aunque estuviera desconectada.
+      autoscaleInfo: () => {
+        if (!self.autoscaleWithShapes || !self.autoscaleWithShapes()) return null;
+        const ps = self.shapes.flatMap(x => x.points.map(q => q.p));
+        if (!ps.length) return null;
+        return { priceRange: { minValue: Math.min(...ps), maxValue: Math.max(...ps) } };
+      },
+      paneViews: () => self._paneViews,
+      priceAxisViews: () => self._axisViews,
+      hitTest: (x, y) => {
+        const hit = self._shapeAt(x, y);
+        if (!hit) return null;
+        return { externalId: hit.id, zOrder: 'top', cursorStyle: 'move', hitTestPriority: 1 };
+      },
+    };
+    this.series.attachPrimitive(this.primitive);
+  }
+
+  redraw() { if (this.requestUpdate) this.requestUpdate(); }
+
+  _paint(ctx, mediaSize) {
+    const env = {
+      width: mediaSize.width,
+      height: mediaSize.height,
+      measure: (t, size) => { ctx.font = `${size}px system-ui, sans-serif`; return ctx.measureText(t).width; },
+    };
+    ctx.save();
+    for (const s of this.shapes) {
+      const pts = this.screenPoints(s);
+      if (!pts) continue;
+      if (s.id === this.selectedId) drawSelection(ctx, s, pts, env);
+      TYPES[s.type].draw(ctx, s, pts, env);
+    }
+    // vista previa de la figura que se está creando
+    if (this.pending && this.cursor) {
+      const prev = this._pendingPreview();
+      if (prev) {
+        const pts = this.screenPoints(prev);
+        if (pts) { ctx.globalAlpha = 0.7; TYPES[prev.type].draw(ctx, prev, pts, env); ctx.globalAlpha = 1; }
+      }
+    }
+    const sel = this.selected();
+    if (sel) {
+      const pts = this.screenPoints(sel);
+      if (pts) drawHandles(ctx, TYPES[sel.type].handles(pts));
+    }
+    if (this.measure) this._paintMeasure(ctx, env);
+    ctx.restore();
+    this._syncAxisViews();
+    if (this.onRender) this.onRender();
+  }
+
+  // Etiqueta de precio en la escala derecha para las figuras horizontales.
+  _syncAxisViews() {
+    const views = [];
+    for (const s of this.shapes) {
+      const t = TYPES[s.type];
+      if (!t.priceLabel) continue;
+      s.points.forEach((p, i) => {
+        const style = i === 1 && s.style2 ? s.style2 : s.style;
+        const y = this.yOf(p.p);
+        if (y === null) return;
+        views.push({
+          coordinate: () => y,
+          text: () => fmtPrice(p.p),
+          textColor: () => '#111111',
+          backColor: () => style.color,
+        });
+      });
+    }
+    this._axisViews = views;
+  }
+
+  // ---------- eventos ----------
+  _installEvents() {
+    const c = this.container;
+    // CAPTURA: llegamos antes que los listeners internos de LWC, que cuelgan
+    // del canvas. Si el gesto es nuestro, stopPropagation y el gráfico ni se
+    // entera; si no lo es, lo dejamos pasar y el gráfico se desplaza normal.
+    c.addEventListener('pointerdown', (e) => this._onDown(e), true);
+    c.addEventListener('pointermove', (e) => this._onMoveHover(e), true);
+    addEventListener('pointermove', (e) => this._onDrag(e), true);
+    addEventListener('pointerup', (e) => this._onUp(e), true);
+    addEventListener('keydown', (e) => this._onKey(e));
+    addEventListener('resize', () => { this._paneRect = null; });
+    c.addEventListener('contextmenu', (e) => {
+      if (this.pending) { e.preventDefault(); this.setTool(null); }
+    });
+  }
+
+  // Rectángulo del canvas del panel (no del contenedor: fuera quedan las
+  // escalas de precio y tiempo, y las coordenadas de LWC son del panel).
+  paneRect() {
+    if (!this._paneRect) {
+      const cs = [...this.container.querySelectorAll('canvas')];
+      if (!cs.length) return null;
+      const big = cs.reduce((a, b) => (a.width * a.height >= b.width * b.height ? a : b));
+      this._paneRect = big.getBoundingClientRect();
+    }
+    return this._paneRect;
+  }
+
+  _pos(e, fresh = false) {
+    if (fresh) this._paneRect = null;
+    const r = this.paneRect();
+    if (!r) return null;
+    return { x: e.clientX - r.left, y: e.clientY - r.top, inside: e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom };
+  }
+
+  _shapeAt(x, y) {
+    const env = { measure: (t, size) => measureText(t, size) };
+    for (let i = this.shapes.length - 1; i >= 0; i--) {   // el de arriba manda
+      const s = this.shapes[i];
+      const pts = this.screenPoints(s);
+      if (pts && TYPES[s.type].hit(x, y, s, pts, env)) return s;
+    }
+    return null;
+  }
+
+  _handleAt(x, y) {
+    const s = this.selected();
+    if (!s) return -1;
+    const pts = this.screenPoints(s);
+    if (!pts) return -1;
+    const hs = TYPES[s.type].handles(pts);
+    for (let i = 0; i < hs.length; i++) {
+      if (Math.abs(x - hs[i].x) <= HANDLE + 3 && Math.abs(y - hs[i].y) <= HANDLE + 3) return i;
+    }
+    return -1;
+  }
+
+  _onDown(e) {
+    if (e.button !== 0) return;
+    const p = this._pos(e, true);   // al pulsar sí se remide: el layout pudo cambiar
+    if (!p || !p.inside) return;
+    const take = () => { e.preventDefault(); e.stopPropagation(); this._lockChart(true); };
+
+    // 1) creación en curso
+    if (this.pending) { take(); this._addPendingPoint(p); return; }
+
+    // 2) medición: shift+click arranca; con medición viva, un click la fija;
+    //    con medición fija, un click la borra. Excepción: shift sobre un
+    //    handle de la zona ajusta esa línea (ver _startDrag).
+    const handleIdx = this._handleAt(p.x, p.y);
+    if (this.measure) {
+      take();
+      if (this.measure.fixed) this.measure = null; else this.measure.fixed = true;
+      this.redraw();
+      return;
+    }
+    if ((e.shiftKey || this.armed) && handleIdx < 0) {
+      this.armed = false;
+      take();
+      this.measure = { from: this._pt(p), to: this._pt(p), fixed: false };
+      this.redraw();
+      return;
+    }
+
+    // 3) redimensionar por un punto de control
+    if (handleIdx >= 0) { take(); this._startDrag('resize', handleIdx, p, e.shiftKey); return; }
+
+    // 4) seleccionar y mover
+    const hit = this._shapeAt(p.x, p.y);
+    if (hit) {
+      take();
+      this._select(hit.id, p);
+      this._startDrag('move', -1, p, e.shiftKey);
+      return;
+    }
+    // 5) fuera de todo: deseleccionar y DEJAR PASAR el evento (el gráfico se
+    //    desplaza como siempre).
+    this._select(null);
+  }
+
+  _pt(p) { return { t: this.timeOfX(p.x), p: this.priceOfY(p.y) }; }
+
+  _startDrag(mode, idx, p, shift) {
+    const s = this.selected();
+    if (!s) return;
+    this.drag = {
+      mode, idx, shift,
+      x0: p.x, y0: p.y,
+      l0: this.chart.timeScale().coordinateToLogical(p.x),
+      snap: s.points.map(q => ({ l: this.logicalOf(q.t), y: this.yOf(q.p) })),
+    };
+  }
+
+  _onDrag(e) {
+    if (!this.drag) return;
+    const s = this.selected();
+    if (!s) return;
+    e.preventDefault(); e.stopPropagation();
+    const r = this.paneRect();
+    const x = e.clientX - r.left, y = e.clientY - r.top;
+    const dl = this.chart.timeScale().coordinateToLogical(x) - this.drag.l0;
+    const dy = y - this.drag.y0;
+    const type = TYPES[s.type];
+
+    const move = (i) => {
+      const snap = this.drag.snap[i];
+      s.points[i] = { t: this.timeOfLogical(snap.l + dl), p: this.priceOfY(snap.y + dy) };
+    };
+    if (this.drag.mode === 'move') {
+      s.points.forEach((_, i) => move(i));
+    } else if (type.linked && !this.drag.shift) {
+      // zona: arrastrar un extremo mueve las DOS manteniendo la distancia
+      s.points.forEach((_, i) => move(i));
+    } else {
+      // Un punto de control puede no corresponder 1 a 1 con un punto del
+      // modelo (el rectángulo tiene 4 esquinas y 2 puntos).
+      const targets = type.handleTargets
+        ? type.handleTargets(this.drag.idx)
+        : [{ i: this.drag.idx, axes: 'xy' }];
+      for (const tg of targets) {
+        const snap = this.drag.snap[tg.i];
+        if (!snap) continue;
+        const q = s.points[tg.i];
+        if (tg.axes.includes('x')) q.t = this.timeOfLogical(snap.l + dl);
+        if (tg.axes.includes('y')) q.p = this.priceOfY(snap.y + dy);
+      }
+      if (type.linked) {   // el tiempo de las dos líneas de la zona va unido
+        const t = s.points[this.drag.idx].t;
+        s.points.forEach((q) => { q.t = t; });
+      }
+    }
+    this.redraw();
+  }
+
+  _onUp() {
+    if (!this.drag) return;
+    const s = this.selected();
+    this.drag = null;
+    this._lockChart(false);
+    if (s) this.save(s);
+  }
+
+  _onMoveHover(e) {
+    const p = this._pos(e);
+    if (!p) return;
+    this.cursor = p;
+    if (this.pending || this.measure) { this.redraw(); return; }
+  }
+
+  _onKey(e) {
+    if (e.key === 'Escape') {
+      if (this.pending) this.setTool(null);
+      else if (this.measure) { this.measure = null; this.redraw(); }
+      else this._select(null);
+      return;
+    }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && document.activeElement === document.body) {
+      this.deleteSelected();
+    }
+  }
+
+  // Mientras arrastramos un dibujo, el gráfico no se desplaza ni con el ratón
+  // ni con inercia. Es redundante con el stopPropagation, pero cubre el caso
+  // de que LWC escuche el movimiento en document.
+  _lockChart(on) {
+    this.chart.applyOptions(on
+      ? { handleScroll: false }
+      : { handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true } });
+  }
+
+  // ---------- creación ----------
+  setTool(type) {
+    this.pending = type ? { type, pts: [] } : null;
+    this.container.style.cursor = type ? 'crosshair' : '';
+    // Al empezar a dibujar se deselecciona: si no, el panel de configuración
+    // se queda encima del gráfico y se traga los clicks de creación.
+    if (type) this.selectedId = null;
+    this.onSelect(this.selected(), this);      // refresca panel y barra
+    this.redraw();
+  }
+
+  activeTool() { return this.pending ? this.pending.type : null; }
+
+  // Igual que shift+click, pero desde el botón de la barra: la medición
+  // arranca en el siguiente click sobre el gráfico.
+  armMeasure() {
+    this.armed = true;
+    this.setTool(null);
+    this.container.style.cursor = 'crosshair';
+  }
+
+  _addPendingPoint(p) {
+    const { type } = this.pending;
+    this.pending.pts.push(this._pt(p));
+    const need = TYPES[type].points;
+    if (this.pending.pts.length < need) { this.redraw(); return; }
+    const points = this.pending.pts.slice();
+    this.pending = null;
+    this.container.style.cursor = '';
+    const s = this.addShape(type, points);
+    this._select(s.id);
+  }
+
+  // Alta de una figura (la usan la creación por clicks y los tests).
+  addShape(type, points, extra = {}) {
+    if (TYPES[type].linked) points.forEach(q => { q.t = points[0].t; });
+    const s = {
+      id: extra.id || uuid(), type,
+      points: points.map(q => ({ t: q.t, p: q.p })),
+      style: { ...DEFAULT_STYLE, ...(extra.style || {}) },
+      ...(TYPES[type].linked ? { style2: { ...DEFAULT_STYLE, color: '#3fb950', ...(extra.style2 || {}) } } : {}),
+      ...(TYPES[type].text ? { text: extra.text ?? 'Texto' } : {}),
+    };
+    this.shapes.push(s);
+    this.redraw();
+    this.save(s);
+    return s;
+  }
+
+  _pendingPreview() {
+    const { type, pts } = this.pending;
+    const need = TYPES[type].points;
+    const all = [...pts, this._pt(this.cursor)];
+    while (all.length < need) all.push(all[all.length - 1]);
+    const points = all.slice(0, need);
+    if (TYPES[type].linked) points.forEach(q => { q.t = points[0].t; });
+    return { id: '__preview', type, points, style: { ...DEFAULT_STYLE }, style2: { ...DEFAULT_STYLE }, text: 'Texto' };
+  }
+
+  // ---------- selección y estilo ----------
+  selected() { return this.shapes.find(s => s.id === this.selectedId) || null; }
+
+  _select(id, p) {
+    this.selectedId = id;
+    if (id && p) {
+      const s = this.selected();
+      // en la zona, el panel edita la línea que se ha tocado
+      if (s && TYPES[s.type].linked) {
+        const pts = this.screenPoints(s);
+        this.activeLine = pts && Math.abs(p.y - pts[1].y) < Math.abs(p.y - pts[0].y) ? 1 : 0;
+      } else this.activeLine = 0;
+    }
+    this.onSelect(this.selected(), this);
+    this.redraw();
+  }
+
+  select(id) { this._select(id); }
+
+  styleOf(s = this.selected()) {
+    if (!s) return null;
+    return this.activeLine === 1 && s.style2 ? s.style2 : s.style;
+  }
+
+  patchStyle(patch) {
+    const s = this.selected();
+    if (!s) return;
+    Object.assign(this.styleOf(s), patch);
+    this.redraw();
+    this.save(s);
+  }
+
+  setText(text) {
+    const s = this.selected();
+    if (!s) return;
+    s.text = text;
+    this.redraw();
+    this.save(s);
+  }
+
+  deleteSelected() {
+    const s = this.selected();
+    if (!s) return;
+    this.shapes = this.shapes.filter(x => x.id !== s.id);
+    this.selectedId = null;
+    this.onDelete(s.id);
+    this.onSelect(null, this);
+    this.redraw();
+  }
+
+  // ---------- persistencia ----------
+  save(s) {
+    clearTimeout(this.timers.get(s.id));
+    this.timers.set(s.id, setTimeout(() => this.onSave(s.id, this.toJSON(s)), PERSIST_MS));
+  }
+
+  toJSON(s) {
+    return {
+      kind: 'shape', v: 1, type: s.type,
+      points: s.points.map(p => ({ t: p.t, p: p.p })),
+      style: { ...s.style },
+      ...(s.style2 ? { style2: { ...s.style2 } } : {}),
+      ...(s.text !== undefined ? { text: s.text } : {}),
+    };
+  }
+
+  load(rows) {
+    for (const { id, payload } of rows) {
+      if (!payload || payload.kind !== 'shape' || !TYPES[payload.type]) continue;
+      this.shapes.push({
+        id, type: payload.type,
+        points: payload.points.map(p => ({ t: p.t, p: p.p })),
+        style: { ...DEFAULT_STYLE, ...payload.style },
+        ...(payload.style2 ? { style2: { ...DEFAULT_STYLE, ...payload.style2 } } : {}),
+        ...(payload.text !== undefined ? { text: payload.text } : {}),
+      });
+    }
+    this.redraw();
+  }
+
+  // ---------- medición ----------
+  _paintMeasure(ctx, env) {
+    const m = this.measure;
+    if (!m.fixed && this.cursor) m.to = this._pt(this.cursor);
+    const x1 = this.xOf(m.from.t), y1 = this.yOf(m.from.p);
+    const x2 = this.xOf(m.to.t), y2 = this.yOf(m.to.p);
+    if ([x1, y1, x2, y2].some(v => v === null)) return;
+
+    const up = m.to.p >= m.from.p;
+    const col = up ? '#26a69a' : '#ef5350';
+    ctx.setLineDash([]);
+    ctx.fillStyle = rgba(col, 0.18);
+    ctx.fillRect(Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1));
+    ctx.strokeStyle = rgba(col, 0.9);
+    ctx.lineWidth = 1;
+    ctx.strokeRect(Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1));
+    arrow(ctx, x1, (y1 + y2) / 2, x2, (y1 + y2) / 2, col);   // horizontal
+    arrow(ctx, (x1 + x2) / 2, y1, (x1 + x2) / 2, y2, col);   // vertical
+
+    const d = m.to.p - m.from.p;
+    const pct = m.from.p ? (d / m.from.p) * 100 : 0;
+    const barsN = Math.round(Math.abs(this.logicalOf(m.to.t) - this.logicalOf(m.from.t)));
+    const secs = Math.abs(m.to.t - m.from.t);
+    const txt = [
+      `${d >= 0 ? '+' : '−'}${fmtPrice(Math.abs(d))} (${pct >= 0 ? '+' : '−'}${Math.abs(pct).toFixed(2)}%)`,
+      `${barsN} barras · ${fmtDuration(secs)}`,
+    ];
+    ctx.font = '12px system-ui, sans-serif';
+    const w = Math.max(...txt.map(t => ctx.measureText(t).width)) + 12;
+    const bx = Math.max(2, Math.min((x1 + x2) / 2 - w / 2, env.width - w - 2));
+    const by = Math.max(2, Math.min(Math.min(y1, y2) - 40, env.height - 36));
+    ctx.fillStyle = rgba(col, 0.95);
+    ctx.fillRect(bx, by, w, 34);
+    ctx.fillStyle = '#ffffff';
+    ctx.textBaseline = 'middle';
+    txt.forEach((t, i) => ctx.fillText(t, bx + 6, by + 10 + i * 15));
+  }
+
+  measureInfo() {   // para los tests: lo mismo que se pinta, en datos
+    const m = this.measure;
+    if (!m) return null;
+    const d = m.to.p - m.from.p;
+    return {
+      fixed: m.fixed, delta: d,
+      pct: m.from.p ? (d / m.from.p) * 100 : 0,
+      bars: Math.round(Math.abs(this.logicalOf(m.to.t) - this.logicalOf(m.from.t))),
+      seconds: Math.abs(m.to.t - m.from.t),
+      duration: fmtDuration(Math.abs(m.to.t - m.from.t)),
+    };
+  }
+}
+
+function arrow(ctx, x1, y1, x2, y2, col) {
+  ctx.strokeStyle = rgba(col, 0.9);
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  const a = Math.atan2(y2 - y1, x2 - x1), h = 6;
+  if (dist(x1, y1, x2, y2) < 4) return;
+  ctx.beginPath();
+  ctx.moveTo(x2, y2);
+  ctx.lineTo(x2 - h * Math.cos(a - 0.4), y2 - h * Math.sin(a - 0.4));
+  ctx.lineTo(x2 - h * Math.cos(a + 0.4), y2 - h * Math.sin(a + 0.4));
+  ctx.closePath();
+  ctx.fillStyle = rgba(col, 0.9);
+  ctx.fill();
+}
+
+// medición de texto fuera del canvas del gráfico (para hit-test)
+let _mctx = null;
+function measureText(t, size) {
+  if (!_mctx) _mctx = document.createElement('canvas').getContext('2d');
+  _mctx.font = `${size}px system-ui, sans-serif`;
+  return _mctx.measureText(t).width;
+}

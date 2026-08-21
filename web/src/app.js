@@ -4,10 +4,8 @@
 // - dibujos persistentes en precio+tiempo UTC absoluto (RF-4.3 / RF-5.5)
 // - zona horaria de PRESENTACIÓN Europe/Madrid con DST; todo lo interno en UTC
 import { createChart, CandlestickSeries } from 'lightweight-charts';
-import {
-  DrawingManager, HorizontalLine, HorizontalRay, TrendLine, Rectangle,
-  Curve, Arc, Circle, TextAnnotation,
-} from 'lightweight-charts-drawing';
+import { DrawEngine } from './draw/engine.js';
+import { mountPanel } from './draw/panel.js';
 
 const $ = (sel) => document.querySelector(sel);
 const statusEl = $('#status');
@@ -255,194 +253,35 @@ function connectWS() {
   ws.onclose = () => { statusEl.textContent = 'reconectando…'; setTimeout(connectWS, 2000); };
 }
 
-// ---------- dibujos ----------
-const dm = new DrawingManager();
-dm.attach(chart, series, container);
-
-// El autoajuste de la escala debe mirar SOLO las velas: un rectángulo en 100k
-// no puede forzar un zoom out al pulsar "auto". Cada dibujo del plugin es a la
-// vez la primitive que LWC consulta y su clase base devuelve el rango de sus
-// anclas en autoscaleInfo(); se anula por instancia al añadirlo.
-function addDrawing(d) {
-  if (!CONFIG.drawingsAutoscale) d.autoscaleInfo = () => null;
-  dm.addDrawing(d);
-  return d;
+// ---------- dibujos (F3: motor propio, ver draw/engine.js) ----------
+// El paso por segundos-por-vela permite colocar dibujos entre velas y a la
+// derecha de la última: el motor convierte tiempo <-> índice lógico.
+function barStep() {
+  if (tf.seconds > 0) return tf.seconds;
+  if (bars.length > 1) return bars[bars.length - 1][0] - bars[bars.length - 2][0];
+  return 86400 * 30;                       // meses de calendario: aproximación
 }
 
-const zoneRegistry = new Map(); // lineId -> {zoneId, role:'a'|'b', siblingId}
-const zones = new Map();        // zoneId -> {time, a:{price,...}, b:{price,...}}
-let shiftDown = false;
-addEventListener('keydown', e => { if (e.key === 'Shift') shiftDown = true; });
-addEventListener('keyup', e => { if (e.key === 'Shift') shiftDown = false; });
-
-const uuid = () => crypto.randomUUID();
-
-async function persistDrawing(id, payload) {
-  await fetch(`/api/drawings/${id}`, {
+const engine = new DrawEngine({
+  chart, series, container,
+  getBars: () => bars,
+  getStep: barStep,
+  autoscaleWithShapes: () => CONFIG.drawingsAutoscale,
+  onSave: (id, payload) => fetch(`/api/drawings/${id}`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
-  }).catch(() => {});
-}
-async function deleteDrawing(id) {
-  await fetch(`/api/drawings/${id}`, { method: 'DELETE' }).catch(() => {});
-}
-
-const persistTimers = new Map();
-function schedulePersist(drawing) {
-  const reg = zoneRegistry.get(drawing.id);
-  const key = reg ? reg.zoneId : drawing.id;
-  clearTimeout(persistTimers.get(key));
-  persistTimers.set(key, setTimeout(() => {
-    if (reg) persistDrawing(key, { kind: 'zone2', data: zones.get(key) });
-    else persistDrawing(key, { kind: 'plugin', data: drawing.toJSON() });
-  }, 400));
-}
-
-// Zona de dos niveles: dos HorizontalRay agrupados. Arrastre normal = las dos
-// juntas manteniendo distancia; con Shift = solo la agarrada (ajuste de
-// separación). El handle izquierdo es solo punto de agarre.
-function zoneLine(zoneId, role, time, spec) {
-  const id = `${zoneId}:${role}`;
-  // Construcción SIEMPRE con anchors explícitos: el `create` estático
-  // heredado tiene otro orden de argumentos (id, time, price) y colocaba el
-  // precio en el tiempo. Con el objeto anchor no hay ambigüedad.
-  const line = new HorizontalRay(id, [{ time, price: spec.price }],
-    { color: spec.color, lineWidth: spec.lineWidth }, { direction: 'right', showPrice: true });
-  addDrawing(line);
-  zoneRegistry.set(id, { zoneId, role, siblingId: `${zoneId}:${role === 'a' ? 'b' : 'a'}` });
-  return line;
-}
-
-function createZone(zoneId, spec) {
-  zones.set(zoneId, spec);
-  zoneLine(zoneId, 'a', spec.time, spec.a);
-  zoneLine(zoneId, 'b', spec.time, spec.b);
-}
-
-let syncingZone = false;
-dm.on('drawing:updated', ({ drawing }) => {
-  if (!drawing) return;
-  const reg = zoneRegistry.get(drawing.id);
-  if (reg && !syncingZone) {
-    const zone = zones.get(reg.zoneId);
-    const role = reg.role;
-    const newPrice = drawing.anchors[0].price;
-    const delta = newPrice - zone[role].price;
-    zone[role].price = newPrice;
-    zone.time = drawing.anchors[0].time;
-    if (!shiftDown && delta !== 0) {
-      const sib = dm.getDrawing(reg.siblingId);
-      if (sib) {
-        syncingZone = true;
-        const other = role === 'a' ? 'b' : 'a';
-        zone[other].price += delta;
-        sib.updateAnchor(0, { time: zone.time, price: zone[other].price });
-        syncingZone = false;
-      }
-    } else {
-      const sib = dm.getDrawing(reg.siblingId);
-      if (sib) { syncingZone = true; sib.updateAnchor(0, { time: zone.time, price: zone[reg.role === 'a' ? 'b' : 'a'].price }); syncingZone = false; }
-    }
-  }
-  schedulePersist(drawing);
+  }).catch(() => {}),
+  onDelete: (id) => fetch(`/api/drawings/${id}`, { method: 'DELETE' }).catch(() => {}),
+  onSelect: () => {
+    document.querySelectorAll('.tools button').forEach(b => {
+      b.classList.toggle('active', b.dataset.tool === engine.activeTool());
+    });
+  },
 });
-
-// ---------- creación por clicks ----------
-const TOOL_DEFS = {
-  hline: { clicks: 1, make: (id, pts) => HorizontalLine.create(id, pts[0].price, pts[0].time, style(), { extendLeft: true, extendRight: true }) },
-  hray:  { clicks: 1, make: (id, pts) => new HorizontalRay(id, [pts[0]], style(), { direction: 'right' }) },
-  trend: { clicks: 2, make: (id, pts) => new TrendLine(id, pts, style()) },
-  rect:  { clicks: 2, make: (id, pts) => new Rectangle(id, pts, { ...style(), fillColor: 'rgba(240,185,11,.12)' }) },
-  curve: { clicks: 4, make: (id, pts) => new Curve(id, pts, style()) },
-  arc:   { clicks: 3, make: (id, pts) => new Arc(id, pts, style()) },
-  point: { clicks: 1, make: (id, pts) => {
-    // "Punto": círculo pequeño relleno; el segundo ancla (radio) se deriva
-    // del rango de precio visible para que se vea como un punto.
-    const p = pts[0];
-    const r = { time: p.time, price: p.price * 1.0008 };
-    return new Circle(id, [p, r], style(), { filled: true });
-  } },
-  text:  { clicks: 1, make: (id, pts) => {
-    const t = prompt('Texto:', ''); if (!t) return null;
-    return new TextAnnotation(id, pts, style(), { text: t });
-  } },
-};
-function style() { return { color: '#f0b90b', lineWidth: 1 }; }
-
-let activeTool = null, pendingPoints = [];
-function setTool(name) {
-  activeTool = name; pendingPoints = [];
-  dm.setActiveTool(name); // bloquea la selección del plugin mientras se crea
-  document.querySelectorAll('.tools button').forEach(b => b.classList.toggle('active', b.dataset.tool === name));
-}
-
-chart.subscribeClick((param) => {
-  if (!activeTool || !param.point || param.time === undefined) return;
-  const price = series.coordinateToPrice(param.point.y);
-  if (price === null) return;
-  pendingPoints.push({ time: param.time, price });
-
-  if (activeTool === 'zone2') {
-    if (pendingPoints.length < 2) return;
-    const id = uuid();
-    const [p1, p2] = pendingPoints;
-    const spec = {
-      time: p1.time,
-      a: { price: p1.price, color: '#f0b90b', lineWidth: 2 },
-      b: { price: p2.price, color: '#3fb950', lineWidth: 1 },
-    };
-    createZone(id, spec);
-    persistDrawing(id, { kind: 'zone2', data: spec });
-    setTool(null);
-    return;
-  }
-  const def = TOOL_DEFS[activeTool];
-  if (!def || pendingPoints.length < def.clicks) return;
-  const id = uuid();
-  const d = def.make(id, pendingPoints);
-  setTool(null);
-  if (!d) return;
-  addDrawing(d);
-  dm.selectDrawing(id);
-  persistDrawing(id, { kind: 'plugin', data: d.toJSON() });
-});
-
-addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') setTool(null);
-  if ((e.key === 'Delete' || e.key === 'Backspace') && document.activeElement === document.body) {
-    const sel = dm.getSelectedDrawing();
-    if (!sel) return;
-    const reg = zoneRegistry.get(sel.id);
-    if (reg) {
-      const zone = zones.get(reg.zoneId);
-      dm.removeDrawing(`${reg.zoneId}:a`); dm.removeDrawing(`${reg.zoneId}:b`);
-      zoneRegistry.delete(`${reg.zoneId}:a`); zoneRegistry.delete(`${reg.zoneId}:b`);
-      zones.delete(reg.zoneId);
-      deleteDrawing(reg.zoneId);
-    } else {
-      dm.removeDrawing(sel.id);
-      deleteDrawing(sel.id);
-    }
-  }
-});
-
-// factory para reimportar dibujos del plugin desde su JSON
-const CLASSES = { 'horizontal-line': HorizontalLine, 'horizontal-ray': HorizontalRay,
-  'trend-line': TrendLine, rectangle: Rectangle, curve: Curve, arc: Arc,
-  circle: Circle, 'text-annotation': TextAnnotation };
-function restorePlugin(data) {
-  const cls = CLASSES[data.type];
-  if (!cls) return;
-  const d = new cls(data.id);
-  d.fromJSON(data);
-  addDrawing(d);
-}
+mountPanel(engine, $('#drawPanel'));
 
 async function loadDrawings() {
   const rows = await fetch('/api/drawings').then(r => r.json()).catch(() => []);
-  for (const row of rows) {
-    if (row.payload.kind === 'zone2') createZone(row.id, row.payload.data);
-    else if (row.payload.kind === 'plugin') restorePlugin({ ...row.payload.data, id: row.id });
-  }
+  engine.load(rows);
 }
 
 // ---------- toolbar ----------
@@ -455,11 +294,10 @@ for (const t of TFS) {
 }
 document.querySelectorAll('.tools button').forEach(b => {
   b.onclick = () => {
-    if (b.dataset.tool === '__clear') {
-      dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete' }));
-      return;
-    }
-    setTool(activeTool === b.dataset.tool ? null : b.dataset.tool);
+    const t = b.dataset.tool;
+    if (t === '__clear') { engine.deleteSelected(); return; }
+    if (t === '__measure') { engine.armMeasure(); return; }
+    engine.setTool(engine.activeTool() === t ? null : t);
   };
 });
 
@@ -539,6 +377,6 @@ addEventListener('resize', () => {
 })();
 
 // hooks de test (DST, streaming) — sin efecto en producción
-window.__test = { bucketStart, fmtTick, fmtFull, TFS, dm, loadTF, chart, series,
-  getBars: () => bars, getTF: () => tf, setTool, zones, CONFIG, tfsEl, toolsEl,
-  TOOL_DEFS, addDrawing };
+window.__test = { bucketStart, fmtTick, fmtFull, TFS, loadTF, chart, series,
+  getBars: () => bars, getTF: () => tf, CONFIG, tfsEl, toolsEl, engine,
+  panelEl: $('#drawPanel') };

@@ -1,7 +1,6 @@
 // Spike F1c: 86.400 velas de 1s reales en LWC v5 + plugin de dibujo.
 // Mide FPS de pan/zoom y ejercita crear/arrastrar/persistir una horizontal.
 import { createChart, CandlestickSeries } from 'lightweight-charts';
-import { DrawingManager, HorizontalLine } from 'lightweight-charts-drawing';
 
 const container = document.getElementById('chart');
 const chart = createChart(container, {
@@ -11,8 +10,6 @@ const chart = createChart(container, {
 });
 const series = chart.addSeries(CandlestickSeries);
 
-const dm = new DrawingManager();
-dm.attach(chart, series, container);
 
 window.__ready = (async () => {
   // Día completo de 1s desde la API real (2026-08-19, día activo de F0),
@@ -69,52 +66,9 @@ window.runZoom = () => {
   });
 };
 
-// --- dibujo: crear, arrastrar (eventos sintéticos), persistir ---
-
-window.runDrawing = () => {
-  // Ancla en un (time, price) VISIBLE: el drag del DrawingManager exige
-  // mousedown sobre el ancla (hitTestAnchor), no sobre cualquier punto.
-  const ts = chart.timeScale();
-  const range = ts.getVisibleRange();
-  const time = Math.round((range.from + range.to) / 2);
-  const midY = 360;
-  const price = series.coordinateToPrice(midY);
-  const hl = HorizontalLine.create('spike-hl', price, time, { color: '#f39c12', lineWidth: 2 }, { extendLeft: true, extendRight: true });
-  dm.addDrawing(hl);
-  dm.selectDrawing('spike-hl');
-
-  const x0 = ts.timeToCoordinate(time);
-  const y0 = series.priceToCoordinate(price);
-  const rect = container.getBoundingClientRect();
-  const fire = (type, x, y) => container.dispatchEvent(new MouseEvent(type, {
-    bubbles: true, clientX: rect.left + x, clientY: rect.top + y, button: 0,
-  }));
-  fire('mousedown', x0, y0);
-  for (let i = 1; i <= 10; i++) fire('mousemove', x0, y0 - 8 * i);
-  fire('mouseup', x0, y0 - 80);
-
-  const moved = dm.getDrawing('spike-hl');
-  const newPrice = moved.anchors[0].price;
-
-  // Persistencia: export → clear → import con factory.
-  const json = JSON.stringify(dm.exportDrawings());
-  dm.clearAll();
-  const cleared = dm.getAllDrawings().length;
-  dm.importDrawings(JSON.parse(json), (type, data) => {
-    if (type === 'horizontal-line') {
-      const d = new HorizontalLine(data.id);
-      d.fromJSON(data);
-      return d;
-    }
-    return null;
-  });
-  const restored = dm.getDrawing('spike-hl');
-  return {
-    createdAtPrice: price,
-    priceAfterDrag: newPrice,
-    dragWorked: Math.abs(newPrice - price) > 1,
-    clearedCount: cleared,
-    restoredPrice: restored ? restored.anchors[0].price : null,
-    persistWorked: !!restored && Math.abs(restored.anchors[0].price - newPrice) < 1e-9,
-  };
-};
+// --- dibujo ---
+// El spike de F1c validaba aquí el plugin lightweight-charts-drawing. En F3 el
+// plugin se retiró (motor propio en src/draw/) y esta parte del spike se queda
+// sin objeto: la verificación de crear/arrastrar/persistir vive ahora en
+// app-test.mjs con gestos reales sobre la aplicación de verdad.
+window.runDrawing = () => ({ retirado: 'ver app-test.mjs (F3)' });

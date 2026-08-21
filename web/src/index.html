@@ -35,6 +35,25 @@
   .grip { cursor:grab; color:var(--muted); padding:0 5px; user-select:none; touch-action:none;
           letter-spacing:-2px; }
   .tools.dragging .grip { cursor:grabbing; }
+  /* Panel de configuración del dibujo seleccionado (F3) */
+  #drawPanel { position:fixed; z-index:40; background:var(--panel); border:1px solid var(--border);
+               border-radius:6px; padding:6px 8px; box-shadow:0 6px 18px rgba(0,0,0,.5);
+               display:flex; flex-direction:column; gap:5px; font-size:12px; min-width:210px; }
+  #drawPanel[hidden] { display:none; }
+  #drawPanel .row { display:flex; align-items:center; gap:6px; }
+  #drawPanel .row[hidden] { display:none; }
+  #drawPanel label { color:var(--muted); display:flex; align-items:center; gap:4px; flex:1; }
+  #drawPanel input[type=color] { width:26px; height:22px; padding:0; border:1px solid var(--border);
+                                 background:none; border-radius:4px; cursor:pointer; }
+  #drawPanel input[type=range] { flex:1; min-width:70px; accent-color:var(--accent); }
+  #drawPanel input[type=text] { flex:1; background:#3a3a3a; color:var(--fg); border:1px solid var(--border);
+                                border-radius:4px; padding:2px 5px; font:inherit; }
+  #drawPanel select { background:#3a3a3a; color:var(--fg); border:1px solid var(--border);
+                      border-radius:4px; padding:2px 4px; font:inherit; }
+  #drawPanel button { background:transparent; color:var(--fg); border:1px solid transparent;
+                      border-radius:4px; padding:2px 6px; cursor:pointer; font:inherit; }
+  #drawPanel button:hover { background:#404040; }
+  #drawPanel button.active { color:var(--accent); border-color:var(--border); background:#404040; }
 </style>
 </head>
 <body>
@@ -55,7 +74,29 @@
   <button data-tool="point" title="Punto">●</button>
   <button data-tool="text" title="Texto">T</button>
   <button data-tool="zone2" title="Zona de dos niveles">≡</button>
+  <button data-tool="__measure" title="Medir (o Shift + click en el gráfico)">📏</button>
   <button data-tool="__clear" title="Borrar selección (Supr)">🗑</button>
+</div>
+<div id="drawPanel" hidden>
+  <div class="row">
+    <input type="color" data-k="color" title="Color de línea">
+    <select data-k="width" title="Grosor">
+      <option value="1">1 px</option><option value="2">2 px</option>
+      <option value="3">3 px</option><option value="4">4 px</option>
+    </select>
+    <select data-k="dash" title="Estilo">
+      <option value="0">Sólida</option><option value="1">Discontinua</option>
+    </select>
+    <button data-act="del" title="Borrar (Supr)">🗑</button>
+  </div>
+  <div class="row"><label>Opacidad<input type="range" data-k="opacity" min="0.1" max="1" step="0.05"></label></div>
+  <div class="row row-fill">
+    <input type="color" data-k="fill" title="Color de relleno">
+    <label>Relleno<input type="range" data-k="fillOpacity" min="0" max="1" step="0.05"></label>
+  </div>
+  <div class="row row-text"><input type="text" data-k="text" placeholder="Texto"></div>
+  <div class="row row-zone"><span style="color:var(--muted)">Línea</span>
+    <button data-line="0">A</button><button data-line="1">B</button></div>
 </div>
 <script src="app.js"></script>
 </body>

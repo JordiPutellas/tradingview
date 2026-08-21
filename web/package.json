@@ -4,15 +4,14 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node app-test.mjs && node draw-test.mjs",
     "build": "node build.mjs"
   },
   "keywords": [],
   "type": "commonjs",
   "dependencies": {
     "esbuild": "^0.28.2",
-    "lightweight-charts": "^5.2.1",
-    "lightweight-charts-drawing": "^0.1.1"
+    "lightweight-charts": "^5.2.1"
   },
   "devDependencies": {
     "playwright": "^1.62.1"
