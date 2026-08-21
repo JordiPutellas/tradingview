@@ -61,6 +61,7 @@ func dispatch(cmd string, args []string) error {
 		fromS := fs.String("from", "", "primer día UTC (YYYY-MM-DD)")
 		toS := fs.String("to", "", "último día UTC inclusive (YYYY-MM-DD)")
 		cache := fs.String("cache", "data/bulk-cache", "directorio de caché de ZIPs")
+		minFree := fs.Float64("min-free-gb", 5, "GiB libres mínimos; por debajo, aborta")
 		fs.Parse(args)
 		from, err := time.Parse("2006-01-02", *fromS)
 		if err != nil {
@@ -70,17 +71,69 @@ func dispatch(cmd string, args []string) error {
 		if err != nil {
 			return fmt.Errorf("-to: %w", err)
 		}
+		backfill.MinFreeBytes = int64(*minFree * (1 << 30))
 		if err := store.Migrate(ctx, pg.Pool); err != nil {
 			return err
 		}
 		return backfill.Run(ctx, pg, cfg.Symbol, from, to, *cache)
+	case "backfill-1m":
+		fs := flag.NewFlagSet("backfill-1m", flag.ExitOnError)
+		fromS := fs.String("from", "2019-09-08", "primer día UTC (YYYY-MM-DD); por defecto el origen del par")
+		cache := fs.String("cache", "data/bulk-cache", "directorio de caché de ZIPs")
+		fs.Parse(args)
+		from, err := time.Parse("2006-01-02", *fromS)
+		if err != nil {
+			return fmt.Errorf("-from: %w", err)
+		}
+		if err := store.Migrate(ctx, pg.Pool); err != nil {
+			return err
+		}
+		return backfill.Run1m(ctx, pg, binance.NewREST(cfg.FapiBaseURL, cfg.Symbol), cfg.Symbol, from, *cache)
+	case "t1":
+		fs := flag.NewFlagSet("t1", flag.ExitOnError)
+		fromS := fs.String("from", "", "primer día a corregir (YYYY-MM-DD); por defecto, continúa desde el último")
+		toS := fs.String("to", "", "último día (YYYY-MM-DD); por defecto, ayer")
+		cache := fs.String("cache", "data/bulk-cache", "directorio de caché de ZIPs")
+		fs.Parse(args)
+		if err := store.Migrate(ctx, pg.Pool); err != nil {
+			return err
+		}
+		yesterday := time.Now().UTC().Truncate(24 * time.Hour).AddDate(0, 0, -1)
+		to := yesterday
+		if *toS != "" {
+			if to, err = time.Parse("2006-01-02", *toS); err != nil {
+				return fmt.Errorf("-to: %w", err)
+			}
+		}
+		var from time.Time
+		if *fromS != "" {
+			if from, err = time.Parse("2006-01-02", *fromS); err != nil {
+				return fmt.Errorf("-from: %w", err)
+			}
+		} else {
+			if from, err = backfill.LastT1Day(ctx, pg); err != nil {
+				return err
+			}
+			if from.IsZero() {
+				from = yesterday // primera ejecución: solo hacia adelante
+			}
+		}
+		return backfill.RunT1(ctx, pg, binance.NewREST(cfg.FapiBaseURL, cfg.Symbol), cfg.Symbol, from, to, *cache)
+	case "resolve-gaps":
+		fs := flag.NewFlagSet("resolve-gaps", flag.ExitOnError)
+		cache := fs.String("cache", "data/bulk-cache", "directorio de caché de ZIPs")
+		fs.Parse(args)
+		if err := store.Migrate(ctx, pg.Pool); err != nil {
+			return err
+		}
+		return backfill.ResolveGaps(ctx, pg, cfg.Symbol, *cache)
 	case "run":
 		if err := store.Migrate(ctx, pg.Pool); err != nil {
 			return err
 		}
 		return run(ctx, cfg, pg)
 	default:
-		return fmt.Errorf("unknown command %q (run|migrate|backfill)", cmd)
+		return fmt.Errorf("unknown command %q (run|migrate|backfill|backfill-1m|t1|resolve-gaps)", cmd)
 	}
 }
 

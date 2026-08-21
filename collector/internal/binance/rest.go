@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"jputellas.dev/btcdash/collector/internal/candle"
+	"jputellas.dev/btcdash/collector/internal/fixed"
 )
 
 // REST es el cliente de /fapi para reconciliación de huecos.
@@ -99,6 +100,114 @@ func (r *REST) fetch(ctx context.Context, params string) ([]candle.AggTrade, err
 			}
 		case resp.StatusCode == http.StatusBadRequest && isCode(body, -4166):
 			return nil, ErrOutsideWindow
+		case resp.StatusCode >= 500 && attempt < 5:
+			time.Sleep(time.Duration(attempt) * 2 * time.Second)
+		default:
+			return nil, fmt.Errorf("rest: HTTP %d: %s", resp.StatusCode, body)
+		}
+	}
+}
+
+// Klines1m devuelve las klines 1m oficiales con open_time en [startMs, endMs),
+// paginando por startTime. A diferencia de aggTrades, paginar klines por
+// tiempo es seguro (buckets fijos de 60s, sin ambigüedad de milisegundo) y el
+// endpoint no tiene ventana de 48 h: llega hasta el origen del par (2019).
+// Peso 10/req con limit=1500; se pacea a ~4 req/s.
+func (r *REST) Klines1m(ctx context.Context, startMs, endMs int64, fn func(Kline1m) error) (int64, error) {
+	var total int64
+	cursor := startMs
+	for cursor < endMs {
+		url := fmt.Sprintf("%s/fapi/v1/klines?symbol=%s&interval=1m&startTime=%d&limit=1500", r.BaseURL, r.Symbol, cursor)
+		body, err := r.getWithRetry(ctx, url)
+		if err != nil {
+			return total, err
+		}
+		var rows [][]json.RawMessage
+		if err := json.Unmarshal(body, &rows); err != nil {
+			return total, fmt.Errorf("rest klines: bad JSON: %w", err)
+		}
+		if len(rows) == 0 {
+			return total, nil
+		}
+		for _, row := range rows {
+			if len(row) < 10 {
+				return total, fmt.Errorf("rest klines: short row (%d cols)", len(row))
+			}
+			var openMs, count int64
+			var o, h, l, c, v, tb string
+			if err := json.Unmarshal(row[0], &openMs); err != nil {
+				return total, err
+			}
+			if openMs >= endMs {
+				return total, nil
+			}
+			for i, dst := range map[int]*string{1: &o, 2: &h, 3: &l, 4: &c, 5: &v, 9: &tb} {
+				if err := json.Unmarshal(row[i], dst); err != nil {
+					return total, err
+				}
+			}
+			if err := json.Unmarshal(row[8], &count); err != nil {
+				return total, err
+			}
+			k := Kline1m{OpenMs: openMs, Count: count}
+			var perr error
+			for _, p := range []struct {
+				dst *int64
+				s   string
+			}{{&k.Open, o}, {&k.High, h}, {&k.Low, l}, {&k.Close, c}, {&k.Volume, v}, {&k.TakerBuy, tb}} {
+				if *p.dst, perr = fixed.Parse(p.s); perr != nil {
+					return total, perr
+				}
+			}
+			if err := fn(k); err != nil {
+				return total, err
+			}
+			total++
+			cursor = openMs + 60_000
+		}
+	}
+	return total, nil
+}
+
+func (r *REST) getWithRetry(ctx context.Context, url string) ([]byte, error) {
+	for attempt := 1; ; attempt++ {
+		select {
+		case <-time.After(250 * time.Millisecond):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := r.HTTP.Do(req)
+		if err != nil {
+			if attempt >= 5 {
+				return nil, err
+			}
+			continue
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case resp.StatusCode == http.StatusOK:
+			return body, nil
+		case resp.StatusCode == 429 || resp.StatusCode == 418:
+			wait := 60 * time.Second
+			if ra := resp.Header.Get("Retry-After"); ra != "" {
+				if s, err := strconv.Atoi(ra); err == nil {
+					wait = time.Duration(s+1) * time.Second
+				}
+			}
+			slog.Warn("rest: rate limited", "status", resp.StatusCode, "wait", wait)
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 		case resp.StatusCode >= 500 && attempt < 5:
 			time.Sleep(time.Duration(attempt) * 2 * time.Second)
 		default:

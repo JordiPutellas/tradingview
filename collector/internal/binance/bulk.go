@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -19,57 +18,14 @@ import (
 	"jputellas.dev/btcdash/collector/internal/fixed"
 )
 
-const bulkBase = "https://data.binance.vision/data/futures/um/daily/aggTrades"
-
 // DownloadDailyAggTrades descarga el ZIP diario de aggTrades a cacheDir,
 // verifica su .CHECKSUM (sha256) y devuelve la ruta local. Si el fichero ya
 // existe y verifica, no se vuelve a descargar (reanudable, RF-1.5).
+// Devuelve ErrNotPublished (envuelto) si el día aún no está en el bucket.
 func DownloadDailyAggTrades(ctx context.Context, symbol string, day time.Time, cacheDir string) (string, error) {
-	name := fmt.Sprintf("%s-aggTrades-%s.zip", symbol, day.Format("2006-01-02"))
-	url := fmt.Sprintf("%s/%s/%s", bulkBase, symbol, name)
-	zipPath := filepath.Join(cacheDir, name)
-
-	sum, err := fetchChecksum(ctx, url+".CHECKSUM")
-	if err != nil {
-		return "", err
-	}
-	if ok, _ := verifySHA256(zipPath, sum); ok {
-		return zipPath, nil
-	}
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
-		return "", err
-	}
-	if err := downloadFile(ctx, url, zipPath); err != nil {
-		return "", err
-	}
-	if ok, got := verifySHA256(zipPath, sum); !ok {
-		return "", fmt.Errorf("bulk: CHECKSUM mismatch for %s: want %s got %s", name, sum, got)
-	}
-	return zipPath, nil
-}
-
-func fetchChecksum(ctx context.Context, url string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("bulk: HTTP %d for %s (¿día aún no publicado?)", resp.StatusCode, url)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if err != nil {
-		return "", err
-	}
-	fields := strings.Fields(string(body))
-	if len(fields) == 0 || len(fields[0]) != 64 {
-		return "", fmt.Errorf("bulk: malformed CHECKSUM file at %s", url)
-	}
-	return fields[0], nil
+	url := fmt.Sprintf("%s/daily/aggTrades/%s/%s-aggTrades-%s.zip",
+		visionBase, symbol, symbol, day.Format("2006-01-02"))
+	return DownloadVisionZip(ctx, url, cacheDir)
 }
 
 func downloadFile(ctx context.Context, url, dst string) error {
