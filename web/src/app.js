@@ -3,7 +3,7 @@
 // - streaming vía WS con series.update(), nunca setData en caliente (RF-5.1)
 // - dibujos persistentes en precio+tiempo UTC absoluto (RF-4.3 / RF-5.5)
 // - zona horaria de PRESENTACIÓN Europe/Madrid con DST; todo lo interno en UTC
-import { createChart, CandlestickSeries, HistogramSeries } from 'lightweight-charts';
+import { createChart, CandlestickSeries } from 'lightweight-charts';
 import {
   DrawingManager, HorizontalLine, HorizontalRay, TrendLine, Rectangle,
   Curve, Arc, Circle, TextAnnotation,
@@ -22,18 +22,33 @@ const cfgNum = (k, def) => {
 const CONFIG = {
   // Fracción del rango visible que se come cada muesca de rueda. LWC nativo
   // mueve el barSpacing un 10% por muesca: hay que girar muchísimo.
-  wheelZoom: cfgNum('wheelZoom', 0.28),
+  wheelZoom: cfgNum('wheelZoom', 0.18),
   // Márgenes de la escala de precio (fracción del alto). El defecto de LWC es
   // top 0.2: demasiado aire sobre el precio.
   priceMarginTop: cfgNum('priceMarginTop', 0.06),
   priceMarginBottom: cfgNum('priceMarginBottom', 0.16),
-  volumeMarginTop: cfgNum('volumeMarginTop', 0.88),
   // 0 = el autoajuste mira solo las velas; 1 = también los dibujos.
   drawingsAutoscale: cfgNum('drawingsAutoscale', 0) === 1,
 };
 
+// Helper de consola para no pelearse con localStorage a mano:
+//   cfg.list()                 qué hay en vigor
+//   cfg.set('wheelZoom', 0.25) ajusta y recarga
+//   cfg.reset()                vuelve a los valores por defecto
+window.cfg = {
+  list: () => ({ ...CONFIG }),
+  set(k, v) { localStorage.setItem(`cfg.${k}`, String(v)); location.reload(); },
+  reset(k) {
+    if (k) localStorage.removeItem(`cfg.${k}`);
+    else Object.keys(localStorage).filter(x => x.startsWith('cfg.')).forEach(x => localStorage.removeItem(x));
+    location.reload();
+  },
+};
+
 // Paleta de las velas: cuerpo, borde y mecha del mismo color (sin outline).
 const UP = '#7092be', DOWN = '#dadada';
+// Crosshair: sólido, oscuro y de 1 px (el defecto de LWC es discontinuo y claro).
+const CROSSHAIR = '#1e1e1e';
 
 // ---------- timeframes ----------
 // Anclajes idénticos a los de la API: semanas/3D/5D sobre 2018-01-01 (lunes),
@@ -91,7 +106,7 @@ const chart = createChart(container, {
     attributionLogo: true, // obligación de la licencia Apache 2.0 (RF-5.6)
     background: { color: '#363636' }, textColor: '#dadada',
   },
-  grid: { vertLines: { color: 'rgba(255,255,255,.06)' }, horzLines: { color: 'rgba(255,255,255,.06)' } },
+  grid: { vertLines: { visible: false }, horzLines: { visible: false } },
   timeScale: {
     timeVisible: true, secondsVisible: false, borderColor: '#4a4a4a',
     tickMarkFormatter: (t, type) => fmtTick(t, type),
@@ -101,7 +116,11 @@ const chart = createChart(container, {
     borderColor: '#4a4a4a',
     scaleMargins: { top: CONFIG.priceMarginTop, bottom: CONFIG.priceMarginBottom },
   },
-  crosshair: { mode: 0 },
+  crosshair: {
+    mode: 0, // libre, no engancha a la vela
+    vertLine: { color: CROSSHAIR, width: 1, style: 0, labelBackgroundColor: CROSSHAIR },
+    horzLine: { color: CROSSHAIR, width: 1, style: 0, labelBackgroundColor: CROSSHAIR },
+  },
   // El zoom de rueda lo hacemos nosotros (más abajo): el nativo es muy corto.
   handleScale: { mouseWheel: false },
 });
@@ -109,12 +128,6 @@ const series = chart.addSeries(CandlestickSeries, {
   upColor: UP, downColor: DOWN, borderVisible: true,
   borderUpColor: UP, borderDownColor: DOWN, wickUpColor: UP, wickDownColor: DOWN,
 });
-const volume = chart.addSeries(HistogramSeries, {
-  priceScaleId: 'vol', priceFormat: { type: 'volume' }, lastValueVisible: false, priceLineVisible: false,
-});
-chart.priceScale('vol').applyOptions({ scaleMargins: { top: CONFIG.volumeMarginTop, bottom: 0 } });
-
-const volColor = (b) => b.close >= b.open ? 'rgba(112,146,190,.55)' : 'rgba(218,218,218,.35)';
 
 // Zoom de rueda propio: escala el rango lógico visible alrededor del cursor.
 // LWC solo ofrece handleScale.mouseWheel on/off (10% de barSpacing por
@@ -135,7 +148,6 @@ container.addEventListener('wheel', (e) => {
   ts.setVisibleLogicalRange({ from: anchor - frac * newSpan, to: anchor + (1 - frac) * newSpan });
 }, { passive: false });
 const toCandle = ([t, o, h, l, c]) => ({ time: t, open: o, high: h, low: l, close: c });
-const toVol = ([t, , , , , v], row) => ({ time: t, value: v, color: volColor(row ?? { open: 0, close: 1 }) });
 
 // ---------- carga y lazy-loading ----------
 let tf = TFS.find(x => x.name === '1m');
@@ -151,7 +163,6 @@ async function fetchCandles(params) {
 
 function render() {
   series.setData(bars.map(toCandle));
-  volume.setData(bars.map(r => ({ time: r[0], value: r[5], color: volColor({ open: r[1], close: r[4] }) })));
 }
 
 async function loadTF(next) {
@@ -198,7 +209,6 @@ async function onTick(m) {
           const i = bars.findIndex(b => b[0] === row[0]);
           if (i >= 0) bars[i] = row;
           series.update(toCandle(row));
-          volume.update({ time: row[0], value: row[5], color: volColor({ open: row[1], close: row[4] }) });
         }
       }).catch(() => {});
     }
@@ -217,7 +227,6 @@ async function onTick(m) {
   const bar = [cur.t, cur.o, cur.h, cur.l, cur.c, cur.vBase + cur.lastSecV];
   if (last && last[0] === cur.t) bars[bars.length - 1] = bar; else bars.push(bar);
   series.update(toCandle(bar));
-  volume.update({ time: bar[0], value: bar[5], color: volColor({ open: bar[1], close: bar[4] }) });
   statusEl.textContent = `${tf.name} · ${m.c.toFixed(1)}`;
 }
 
