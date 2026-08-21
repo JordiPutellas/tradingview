@@ -22,12 +22,12 @@ await wait(600);
 
 // limpieza previa: la BD es compartida con el usuario
 await page.evaluate(async () => {
+  window.__test.engine.clear();
   for (const d of await (await fetch('/api/drawings')).json()) {
-    await fetch(`/api/drawings/${d.id}`, { method: 'DELETE' });
+    await fetch(`/api/drawings/${d.id}`, { method: 'DELETE' });   // restos de sesiones previas
   }
-  window.__test.engine.shapes = [];
-  window.__test.engine.redraw();
 });
+await wait(300);
 
 const estado = () => page.evaluate(() => {
   const e = window.__test.engine;
@@ -121,6 +121,77 @@ check('arrastrar NO mueve el gráfico',
 const d2T = rectDespues.pts[1].t - rectAntes.pts[1].t;
 check('la figura se traslada entera', Math.abs(d2T - dT) <= 1, `p0 ${dT}s vs p1 ${d2T}s`);
 
+// ------------------------- 2b. arrastre de CADA tipo de figura, uno a uno
+// El fallo reportado era "solo se ajusta en vertical y el gráfico se mueve".
+// Se comprueba tipo por tipo, con el lienzo limpio para que no haya dudas de
+// qué figura se agarra.
+const limpiar = async () => {
+  await page.evaluate(() => window.__test.engine.clear());   // cancela guardados y borra
+  await wait(300);
+};
+// Punto por el que agarrar cada tipo (en coordenadas de pantalla).
+const agarre = () => page.evaluate(() => {
+  const e = window.__test.engine;
+  const s = e.shapes[0];
+  const pts = e.screenPoints(s);
+  const r = e.paneRect();
+  const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+  let q;
+  switch (s.type) {
+    case 'hline': q = { x: 300, y: pts[0].y }; break;
+    case 'hray': q = { x: pts[0].x + 120, y: pts[0].y }; break;
+    case 'zone2': q = { x: pts[0].x + 120, y: (pts[0].y + pts[1].y) / 2 }; break;
+    case 'trend': q = mid(pts[0], pts[1]); break;
+    case 'rect': q = mid(pts[0], pts[1]); break;
+    case 'curve': {   // Bézier en t=0.5
+      const b = (a, bb, c, d) => 0.125 * a + 0.375 * bb + 0.375 * c + 0.125 * d;
+      q = { x: b(pts[0].x, pts[1].x, pts[2].x, pts[3].x), y: b(pts[0].y, pts[1].y, pts[2].y, pts[3].y) };
+      break;
+    }
+    case 'arc': {   // un punto DEL arco lejos de los tres puntos de control:
+                    // agarrar justo encima de uno redimensionaría, no movería
+      const c = (a, bb, cc) => {
+        const d = 2 * (a.x * (bb.y - cc.y) + bb.x * (cc.y - a.y) + cc.x * (a.y - bb.y));
+        const a2 = a.x * a.x + a.y * a.y, b2 = bb.x * bb.x + bb.y * bb.y, c2 = cc.x * cc.x + cc.y * cc.y;
+        const cx = (a2 * (bb.y - cc.y) + b2 * (cc.y - a.y) + c2 * (a.y - bb.y)) / d;
+        const cy = (a2 * (cc.x - bb.x) + b2 * (a.x - cc.x) + c2 * (bb.x - a.x)) / d;
+        return { cx, cy, r: Math.hypot(a.x - cx, a.y - cy) };
+      };
+      const k = c(pts[0], pts[1], pts[2]);
+      const ang = (pp) => Math.atan2(pp.y - k.cy, pp.x - k.cx);
+      const a0 = ang(pts[0]), a1 = ang(pts[1]);
+      const m = a0 + (a1 - a0) / 2;               // entre el primero y el medio
+      q = { x: k.cx + k.r * Math.cos(m), y: k.cy + k.r * Math.sin(m) };
+      break;
+    }
+    case 'text': q = { x: pts[0].x + 12, y: pts[0].y }; break;
+    default: q = pts[0];
+  }
+  return { x: r.left + q.x, y: r.top + q.y };
+});
+
+for (const [tool, pts] of HERRAMIENTAS) {
+  await limpiar();
+  await crear(tool, pts);
+  const g = await agarre();
+  await page.mouse.click(g.x, g.y);              // seleccionar
+  await wait(250);
+  const a0 = await estado();
+  if (a0.sel === null) { check(`${tool}: se puede seleccionar con click`, false, 'no seleccionó'); continue; }
+  await arrastrar(g.x, g.y, g.x + 130, g.y - 55);
+  const a1 = await estado();
+  const p0 = a0.figuras[0].pts[0], p1 = a1.figuras[0].pts[0];
+  const movX = p1.t - p0.t, movY = p1.p - p0.p;
+  check(`${tool}: se arrastra en los DOS ejes y el gráfico no se mueve`,
+    movX > 0 && movY > 0
+    && a0.rango.from === a1.rango.from && a0.rango.to === a1.rango.to,
+    `Δt=${movX}s Δp=${movY.toFixed(2)} · rango ${a0.rango.from}→${a1.rango.from}`);
+}
+await limpiar();
+for (const [tool, pts] of HERRAMIENTAS) await crear(tool, pts);   // repuebla para lo que sigue
+await page.mouse.click(825, 360);
+await wait(300);
+
 // ------------------------------------------------ 3. selección y handles
 const conSeleccion = await pixeles();
 check('el dibujo seleccionado muestra puntos de control',
@@ -136,7 +207,13 @@ check('sin selección no hay puntos de control',
   `${cuenta(conSeleccion, '255,255,255')} → ${cuenta(sinSeleccion, '255,255,255')} px`);
 
 // --------------------------------------------- 4. redimensionar por handle
-await page.mouse.click(985, 300);          // reseleccionar el rectángulo (esquina)
+const centroRect = await page.evaluate(() => {   // el rectángulo, donde esté ahora
+  const e = window.__test.engine;
+  const s = e.shapes.find(x => x.type === 'rect');
+  const pts = e.screenPoints(s), r = e.paneRect();
+  return { x: r.left + (pts[0].x + pts[1].x) / 2, y: r.top + (pts[0].y + pts[1].y) / 2 };
+});
+await page.mouse.click(centroRect.x, centroRect.y);
 await wait(300);
 const rEstado = await estado();
 const r0 = rEstado.figuras.find(f => f.type === 'rect');
@@ -201,6 +278,19 @@ await wait(400);
 const trasBorrar = await estado();
 check('Supr borra el dibujo seleccionado', trasBorrar.n === antesBorrar - 1 && trasBorrar.sel === null,
   `${antesBorrar} → ${trasBorrar.n}`);
+// borrar ANTES de que venza el guardado diferido no puede resucitar la figura
+// en la siguiente recarga (el debounce escribía después del DELETE).
+const antesFugaz = (await estado()).n;
+await page.click('button[data-tool="point"]');
+await page.mouse.click(430, 330);
+await page.keyboard.press('Delete');
+await wait(1200);
+const trasFugaz = await page.evaluate(() => fetch('/api/drawings').then(r => r.json()));
+const nTrasFugaz = (await estado()).n;
+check('borrar antes del debounce no resucita la figura',
+  trasFugaz.length === antesFugaz && nTrasFugaz === antesFugaz,
+  `${trasFugaz.length} filas en la API, ${antesFugaz} esperadas`);
+
 const enApi = await page.evaluate(() => fetch('/api/drawings').then(r => r.json()));
 check('la API guarda una fila por figura viva', enApi.length === trasBorrar.n,
   `${enApi.length} filas / ${trasBorrar.n} figuras`);

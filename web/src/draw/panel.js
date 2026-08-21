@@ -53,16 +53,37 @@ export function mountPanel(engine, panelEl) {
     place(s);
   }
 
-  // Se coloca junto a la figura y se recoloca en cada repintado (al desplazar
-  // o hacer zoom el dibujo se mueve y el panel debe seguirlo).
+  // Se coloca PEGADO a la figura pero sin taparla: si el panel cae encima,
+  // el usuario ya no puede arrastrar el dibujo, porque los clicks se los queda
+  // el panel (pasó con la zona de dos niveles y con el rectángulo). Se prueban
+  // cuatro posiciones y se elige la primera que quepa y no solape.
   function place(s) {
     const pts = engine.screenPoints(s);
     const r = engine.paneRect();
     if (!pts || !r) return;
-    const x = Math.max(...pts.map(p => p.x)), y = Math.min(...pts.map(p => p.y));
-    const w = panelEl.offsetWidth || 240, h = panelEl.offsetHeight || 120;
-    const left = Math.min(Math.max(8, r.left + x + 12), innerWidth - w - 8);
-    const top = Math.min(Math.max(8, r.top + y + 12), innerHeight - h - 8);
+    const w = panelEl.offsetWidth || 230, h = panelEl.offsetHeight || 120;
+    const M = 12;
+    const caja = {
+      x1: r.left + Math.min(...pts.map(p => p.x)), x2: r.left + Math.max(...pts.map(p => p.x)),
+      y1: r.top + Math.min(...pts.map(p => p.y)), y2: r.top + Math.max(...pts.map(p => p.y)),
+    };
+    // Las figuras horizontales se pintan hasta el borde derecho del panel:
+    // su caja real ocupa todo el ancho, así que solo caben arriba o abajo.
+    const anchaHastaElBorde = ['hline', 'hray', 'zone2'].includes(s.type);
+    if (anchaHastaElBorde) { caja.x1 = r.left; caja.x2 = r.right; }
+    const cabe = (x, y) => x >= 8 && y >= 8 && x + w <= innerWidth - 8 && y + h <= innerHeight - 8;
+    const solapa = (x, y) => x < caja.x2 + 4 && x + w > caja.x1 - 4 && y < caja.y2 + 4 && y + h > caja.y1 - 4;
+    const opciones = [
+      [caja.x1, caja.y2 + M],          // debajo
+      [caja.x1, caja.y1 - h - M],      // encima
+      [caja.x2 + M, caja.y1],          // a la derecha
+      [caja.x1 - w - M, caja.y1],      // a la izquierda
+    ];
+    let elegida = opciones.find(([x, y]) => cabe(x, y) && !solapa(x, y))
+      || opciones.find(([x, y]) => cabe(x, y))
+      || [caja.x1, caja.y2 + M];
+    const left = Math.min(Math.max(8, elegida[0]), innerWidth - w - 8);
+    const top = Math.min(Math.max(8, elegida[1]), innerHeight - h - 8);
     panelEl.style.left = `${left}px`;
     panelEl.style.top = `${top}px`;
   }

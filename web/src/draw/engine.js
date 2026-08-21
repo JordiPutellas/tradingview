@@ -370,8 +370,13 @@ export class DrawEngine {
       else this._select(null);
       return;
     }
-    if ((e.key === 'Delete' || e.key === 'Backspace') && document.activeElement === document.body) {
-      this.deleteSelected();
+    // Supr borra salvo que se esté escribiendo (el panel tiene un campo de
+    // texto). Antes se exigía foco en <body>, y tras pulsar un botón de la
+    // barra el foco se quedaba ahí: la tecla no hacía nada.
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      const el = document.activeElement;
+      const escribiendo = el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
+      if (!escribiendo) this.deleteSelected();
     }
   }
 
@@ -483,20 +488,32 @@ export class DrawEngine {
     this.save(s);
   }
 
-  deleteSelected() {
-    const s = this.selected();
-    if (!s) return;
-    this.shapes = this.shapes.filter(x => x.id !== s.id);
-    this.selectedId = null;
-    this.onDelete(s.id);
-    this.onSelect(null, this);
+  deleteSelected() { this.remove(this.selectedId); }
+
+  // Toda baja pasa por aquí: primero se cancela el guardado diferido y solo
+  // después se pide el borrado. Si no, el debounce escribía la figura DESPUÉS
+  // del DELETE y reaparecía en la siguiente recarga.
+  remove(id) {
+    if (!id || !this.shapes.some(x => x.id === id)) return;
+    clearTimeout(this.timers.get(id));
+    this.timers.delete(id);
+    this.shapes = this.shapes.filter(x => x.id !== id);
+    if (this.selectedId === id) this.selectedId = null;
+    this.onDelete(id);
+    this.onSelect(this.selected(), this);
     this.redraw();
   }
+
+  clear() { for (const s of [...this.shapes]) this.remove(s.id); }
 
   // ---------- persistencia ----------
   save(s) {
     clearTimeout(this.timers.get(s.id));
-    this.timers.set(s.id, setTimeout(() => this.onSave(s.id, this.toJSON(s)), PERSIST_MS));
+    this.timers.set(s.id, setTimeout(() => {
+      // Segunda red: la figura pudo borrarse mientras el debounce esperaba.
+      if (!this.shapes.some(x => x.id === s.id)) return;
+      this.onSave(s.id, this.toJSON(s));
+    }, PERSIST_MS));
   }
 
   toJSON(s) {
