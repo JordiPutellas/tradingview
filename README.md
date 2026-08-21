@@ -145,6 +145,11 @@ Si LWC v5 + plugin de dibujo resulta inviable (drag/hit-testing inestable, rendi
 - **RF-5.4** Herramientas de dibujo mínimas: línea horizontal, línea de tendencia, rectángulo/zona, texto, medición
 - **RF-5.5** Los dibujos persisten al cambiar de timeframe y entre sesiones
 - **RF-5.6** Atribución a TradingView visible (`attributionLogo: true`) — obligación de la licencia Apache 2.0
+- **RF-5.7** (F2a) Paleta: velas alcistas `#7092be`, bajistas `#dadada`, fondo `#363636`; cuerpo, borde y mecha del mismo color (sin outline)
+- **RF-5.8** (F2a) La barra de timeframes ocupa **una sola línea** siempre; lo que no cabe se desplaza lateralmente (rueda y arrastre), nunca se parte en dos filas
+- **RF-5.9** (F2a) La barra de herramientas de dibujo es **flotante y arrastrable** (puede superponerse a la de timeframes) y su posición persiste entre sesiones
+- **RF-5.10** (F2a) El autoajuste de la escala de precio mira **solo las velas**: los dibujos no lo estiran (se anula `autoscaleInfo` de cada primitive)
+- **RF-5.11** (F2a) Sensibilidad de la rueda y márgenes de la escala **configurables** (`CONFIG` en `web/src/app.js`, ajustable en caliente por `localStorage`)
 
 ### RF-6 — Operación
 
@@ -245,6 +250,7 @@ CREATE TABLE drawings (
 - **Materializados** — `candles_1m` (tabla real) + CAggs: 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1D. Los comunes con rangos visibles largos.
 - **Al vuelo desde `candles_1s`** — 5s, 10s, 15s, 30s, 45s: un rango visible de sub-minuto son ≤10k filas; agregar en la query es trivial y evita 5 CAggs con refresh continuo sobre la hypertable más caliente.
 - **Al vuelo desde `candles_1m`** — 45m, 3h (no estándar).
+- **Reparación y control (F2a):** el histórico de una CAgg no se materializa solo (trampa 13). `store.CAggs` es la lista única que usan el backfill y `collector refresh-caggs`; `TestTimeframeCoverage` comprueba contra la BD real que los 24 timeframes sirven desde 2024-08-21 (los de 1s) y desde 2019-09-08 (los de 1m).
 - **Al vuelo desde `candles_1d`** — 3D, 5D, S, 2S, M, 3M, 6M, 12M: un año son 365 filas de 1D; el coste es nulo y los anclajes raros (semana en lunes, meses de calendario) los resuelve la API con `time_bucket(origin/timezone)` en F1c, sin pelearse con las restricciones de anclaje de las CAggs.
 
 ---
@@ -263,6 +269,7 @@ CREATE TABLE drawings (
 10. **Ventana REST de 48 h (F0-H3)** — `/fapi/v1/aggTrades` devuelve `{"code":-4166,"msg":"Search window is restricted to recent 2 days only."}` para datos de hace >2 días, tanto con `startTime` como con `fromId` (verificado empíricamente con ambos). Implicación operacional: un hueco solo es reconciliable por REST durante ~48 h; después hay que esperar al fichero diario de data.binance.vision (disponible ~08:00-09:00 UTC del día siguiente). La monitorización de frescura (RF-6.3) es lo único que protege esa ventana.
 11. **Ruta `/market` en el WS de futures (F1a)** — desde el aviso del 2026-03-06, los streams de mercado de futures están enrutados: `wss://fstream.binance.com/market/ws/btcusdt@aggTrade`. La ruta antigua sin enrutar (`/ws/...`) **conecta, acepta el SUBSCRIBE y no envía NADA** para `@aggTrade`, `@markPrice` o `@kline` (solo siguen fluyendo los streams "public" como `@bookTicker`): un stream zombi de manual, indistinguible de un mercado parado si no se monitoriza la frescura. Verificado empíricamente el 2026-08-20.
 12. **IDs de trade quemados por STP (F0-H2)** — el Self-Trade Prevention (obligatorio en futures desde dic-2024, modo `EXPIRE_MAKER`) consume IDs de trade sin ejecutar volumen: 19.726 IDs inexistentes en un día real, 4.246 de ellos dentro de rangos `[f,l]` de aggregates. `sum(last_trade_id-first_trade_id+1)` sobrecuenta ~0,08% frente al `count` oficial. La reconciliación de integridad NUNCA debe basarse en conteo de trades: solo volumen (exacto) y continuidad de `aggTradeId` (RF-3.3).
+13. **Una CAgg creada después del backfill nace vacía (F2a)** — `materialized_only=false` NO significa "lo que falte se calcula al vuelo": la lectura une el hipertable materializado *por debajo* de la marca de agua con el cálculo en vivo *por encima*, y el hueco de debajo no lo rellena nadie. Una CAgg creada `WITH NO DATA` sobre datos ya existentes solo materializa lo que su política automática refresca (`start_offset`, aquí 3-7 días): sirve **días** de histórico mientras `candles_1m` tiene **años**, sin error, sin log y sin diferencia visible en la query. Pasó con las seis CAggs de la migración 004 (3m, 30m, 2h, 6h, 8h, 12h), creadas después del backfill de F1b, mientras las cinco de la 002 estaban en la lista que refresca el backfill y sí tenían el histórico completo. Reparación: `collector refresh-caggs`. Prevención: una sola lista (`store.CAggs`) que usan el refresco y el backfill, y `TestTimeframeCoverage`, que comprueba el rango real de los 24 timeframes contra la BD.
 
 ---
 
@@ -277,6 +284,7 @@ CREATE TABLE drawings (
 | **F1d** | (absorbida por F1c)                                                                           | —             |
 | **F1e** | (absorbida por F1c)                                                                           | —             |
 | **F1f** | Infra: Hetzner, Cloudflare Tunnel/Access, backups, monitorización                             | 12-20         |
+| **F2a** | ✅ HECHO — Arreglo de las 6 CAggs sin histórico (trampa 13) + ajustes de frontend (paleta, barras, zoom, autoescala) | 4-6 |
 |         | **Total Fase 1**                                                                              | **135-232 h** |
 
 Fases posteriores (indicadores, volume profile, CVD, alertas, replay): 60-120 h según alcance.

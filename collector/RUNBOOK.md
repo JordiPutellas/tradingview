@@ -11,8 +11,10 @@ F1a están en las secciones 2-5, **verificados en el VPS `jordios` el
 - **5432 ocupado** por `jordios-postgres` (Hermes) → TimescaleDB en **5433**.
 - **8080 ocupado** por el placeholder de cloudflared → health en **8081**.
 - Todo `ports:` con bind explícito `127.0.0.1` (Docker se salta UFW).
-- Ruta en el servidor: `~/btcdash/collector`. Deploy: `rsync` desde el repo y
-  `docker compose up -d --build`.
+- Ruta en el servidor: `~/btcdash/collector`. Deploy: **`./deploy.sh`** desde
+  la raíz del repo (rsync + `docker compose up -d --build` + verificación de
+  salud); `--web` incluye el frontend. A mano equivale a `rsync -az --delete
+  --exclude webdist/ --exclude data/ --exclude .env collector/ jordios:~/btcdash/collector/`.
 - **Config específica del servidor SIEMPRE en `~/btcdash/collector/.env`**
   (gitignorado), nunca editando ficheros versionados: el `rsync` del deploy
   los pisa. Lección aprendida en F1b: la `HEALTHCHECK_URL` activada a mano en
@@ -116,13 +118,28 @@ curl -s localhost:8081/health | jq   # en jordios; en local, el puerto que mapee
 Campos: `status` (ok/stale — stale devuelve HTTP 503), `ws_connected`,
 `data_freshness_seconds` (segundos desde el último aggTrade RECIBIDO — la
 métrica anti-zombi: un WS conectado que no entrega datos dispara esto, no el
-uptime del proceso), `last_candle_ts`, `buffer_len`, `open_gaps`.
+uptime del proceso), `last_candle_ts`, `buffer_len`, `open_gaps`,
+`healthcheck_ping` (F2a: `false` = monitorización externa APAGADA; el arranque
+lo avisa también en el log con un WARN, y `deploy.sh` lo comprueba tras cada
+despliegue).
 
-### Alta en healthchecks.io — ✅ HECHO y probado en producción
+### Alta en healthchecks.io — ⚠️ APAGADA AHORA MISMO (2026-08-21, F2a)
 
-Montado el 2026-08-21 (avisó por Telegram del reinicio de kernel). La URL del
-check vive en `~/btcdash/collector/.env` como `HEALTHCHECK_URL` (ver §0).
-Pasos originales por si hay que recrearlo:
+Montada y probada por el usuario el 2026-08-21 (avisó por Telegram del
+reinicio de kernel), pero **el servidor no tiene `~/btcdash/collector/.env`**:
+`HEALTHCHECK_URL` está vacía y no se está pingando. La activación se había
+hecho editando el compose del servidor y el rsync del deploy volvió a pisarla
+(la misma trampa de F1b). Para dejarla viva otra vez, en el servidor:
+
+```bash
+printf 'HEALTHCHECK_URL=https://hc-ping.com/<uuid>\n' > ~/btcdash/collector/.env
+cd ~/btcdash/collector && docker compose up -d collector
+curl -s 127.0.0.1:8081/health | grep -o '"healthcheck_ping":[a-z]*'   # debe decir true
+```
+
+`.env` está en `.gitignore` y `deploy.sh` lo excluye del rsync y **aborta** si
+no existe o no define `HEALTHCHECK_URL` (sáltatelo a sabiendas con
+`ALLOW_NO_HEALTHCHECK=1`). Pasos originales del alta por si hay que recrearla:
 
 1. Crea un check en healthchecks.io llamado `btcdash-collector`.
 2. Configuración recomendada: **Period = 1 minuto, Grace = 10 minutos**.
@@ -131,7 +148,8 @@ Pasos originales por si hay que recrearlo:
    el ping cesa y la alerta salta a los ~11 min. Margen de sobra dentro de la
    ventana REST de 48 h.
 3. Copia la URL del check (`https://hc-ping.com/<uuid>`) en
-   `docker-compose.yml` → servicio `collector` → `HEALTHCHECK_URL`.
+   `~/btcdash/collector/.env` como `HEALTHCHECK_URL=...` — **nunca** editando
+   `docker-compose.yml`, que el deploy pisa (§0).
 4. En el servidor: `cd ~/btcdash/collector && docker compose up -d collector`
    (recrea el contenedor con la variable).
 5. Verifica en healthchecks.io que llegan pings, y prueba la alerta parando
@@ -233,10 +251,9 @@ restart) y se eliminó.
   ascendentes, cap 20k, epoch UTC), `GET /api/timeframes`, `GET /api/ws`
   (push de la vela en curso vía LISTEN/NOTIFY del colector, ~3/s),
   CRUD `/api/drawings/{id}`, estáticos del frontend en `/`.
-- Deploy del frontend: `cd web && npm run build` y
-  `rsync -az --delete web/dist/ jordios:~/btcdash/collector/webdist/`
-  (montado read-only en el contenedor api). El deploy del colector NO debe
-  tocar `webdist/` (`--exclude webdist/`).
+- Deploy del frontend: `./deploy.sh --web` (compila `web/` y sincroniza
+  `webdist/`, montado read-only en el contenedor api). El deploy del colector
+  NO debe tocar `webdist/` (`--exclude webdist/`).
 - Timeframes al vuelo: sub-minuto desde `candles_1s`; 45m/3h desde `candles_1m`;
   ≥3D desde `candles_1d` con `time_bucket` (semanas ancladas a lunes con
   origin 2018-01-01; meses de calendario UTC). El frontend replica los mismos
@@ -256,6 +273,75 @@ restart) y se eliminó.
 - **Pendiente de verificación del usuario**: WS a través del túnel con
   sesión de Access real (todo lo demás está verificado por dentro; el borde
   responde con el 302 de Access correcto).
+
+## 6d. Operaciones F2a: CAggs sin histórico y despliegue
+
+**El síntoma:** 3m, 30m, 2h, 6h, 8h y 12h servían menos de una semana de velas
+mientras el resto llegaba a 2019. **La causa:** esas seis CAggs se crearon en
+la migración 004 (2026-08-20 20:51) *después* del backfill, nacen `WITH NO
+DATA` y solo su política automática las rellena, que refresca una ventana de
+3-7 días. `materialized_only=false` no tapa el hueco: por debajo de la marca de
+agua se lee del hipertable materializado, y ahí no había nada (trampa 13 del
+README). `store.RefreshCAggs` —lo que llama el backfill— listaba solo las cinco
+CAggs de la migración 002, que por eso sí estaban completas.
+
+**Reparación** (idempotente; se puede repetir cuando haga falta):
+
+```bash
+cd ~/btcdash/collector
+docker compose run --rm collector refresh-caggs -from 2019-09-08          # todas
+docker compose run --rm collector refresh-caggs -only candles_6h,candles_12h  # o algunas
+docker compose run --rm collector coverage      # rango real de los 24 timeframes
+```
+
+Refresca por tramos de 90 días (`store.RefreshChunk`) y recorta el final al
+inicio del bucket en curso: materializar un bucket incompleto lo congelaría
+hasta el siguiente pase de su política. Coste medido en jordios con 7 años de
+`candles_1m` (3,66M filas): **112 s en total** para las seis vistas (3m 62 s y
+1.218.726 velas; 30m 14 s; 2h 11 s; 6h 9 s; 8h 8 s; 12h 8 s), con
+**TimescaleDB en 636 MiB/768** de pico (casi todo page cache) y el colector
+ingiriendo a la vez sin incidencias.
+
+**Control para que no vuelva a pasar en silencio:**
+
+```bash
+DATABASE_URL='postgres://btc:...@127.0.0.1:5433/btc' go test ./internal/api -run Coverage -v
+```
+
+`TestTimeframeCoverage` mide el primer y el último bucket servible de los 24
+timeframes con SU MISMA query y falla si alguno no llega a 2024-08-21 (los que
+salen de 1s) o a 2019-10-01 (los que salen de 1m). Se salta solo si no hay
+`DATABASE_URL`. Si se añade una CAgg, hay que añadirla a `store.CAggs`: es la
+lista que usan el backfill, `refresh-caggs` y nadie más.
+
+**Despliegue con `deploy.sh`** (en la raíz del repo):
+
+```bash
+./deploy.sh --web      # rsync + build de la imagen + frontend + verificación
+./deploy.sh --no-build # solo sincroniza ficheros
+```
+
+Aborta si `~/btcdash/collector/.env` no existe o no define `HEALTHCHECK_URL`
+(§0 y §5), excluye `.env`, `webdist/` y `data/` del rsync, y al terminar
+comprueba `/health` y `/api/health`, avisando si `healthcheck_ping` es `false`.
+
+**Ajustes de interfaz (F2a).** Paleta fija en `web/src/app.js`: velas
+`#7092be`/`#dadada` con borde y mecha del color del cuerpo, fondo `#363636`.
+Lo regulable vive en el objeto `CONFIG` de ese fichero y se puede tocar en
+caliente desde la consola del navegador sin recompilar:
+
+```js
+localStorage.setItem('cfg.wheelZoom', '0.45')        // 0.28: fracción del rango visible por muesca
+localStorage.setItem('cfg.priceMarginTop', '0.10')   // 0.06: aire sobre el precio
+localStorage.setItem('cfg.drawingsAutoscale', '1')   // 0: el autoajuste ignora los dibujos
+location.reload()
+```
+
+El zoom de rueda es propio (LWC solo ofrece on/off y mueve un 10% de
+`barSpacing` por muesca): escala el rango lógico visible alrededor del cursor.
+El autoajuste ignora los dibujos anulando el `autoscaleInfo` de cada primitive
+del plugin, que por defecto devuelve el rango de sus anclas. La posición de la
+barra de dibujo flotante se guarda en `localStorage['btcdash.toolbarPos']`.
 
 ## 7c. Cifras con el histórico completo cargado (2026-08-21, cierre F1b)
 
