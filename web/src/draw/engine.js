@@ -74,13 +74,34 @@ export class DrawEngine {
     return Math.round(b[i][0] + f * ((b[i + 1][0] - b[i][0]) || step));
   }
 
+  // OJO con la API de LWC: logicalToCoordinate(l) devuelve 0 si l no es
+  // entero, y coordinateToLogical(x) redondea al índice de vela más cercano.
+  // Usarlas tal cual cuantiza todo a velas enteras — exactamente el defecto
+  // que le achacamos al plugin. Las dos funciones de aquí interpolan entre
+  // dos anclas enteras, que sí resuelve bien, para trabajar con fracciones.
+  logicalOfX(x) {
+    const ts = this.chart.timeScale();
+    const i = ts.coordinateToLogical(x);
+    if (i === null) return null;
+    const xi = ts.logicalToCoordinate(i), xi1 = ts.logicalToCoordinate(i + 1);
+    if (xi === null || xi1 === null || xi1 === xi) return i;
+    return i + (x - xi) / (xi1 - xi);
+  }
+
   xOf(time) {
     const l = this.logicalOf(time);
-    return l === null ? null : this.chart.timeScale().logicalToCoordinate(l);
+    if (l === null) return null;
+    const ts = this.chart.timeScale();
+    const i = Math.floor(l), f = l - i;
+    const xi = ts.logicalToCoordinate(i);
+    if (xi === null) return null;
+    if (!f) return xi;
+    const xi1 = ts.logicalToCoordinate(i + 1);
+    return xi1 === null ? xi : xi + f * (xi1 - xi);
   }
 
   timeOfX(x) {
-    const l = this.chart.timeScale().coordinateToLogical(x);
+    const l = this.logicalOfX(x);
     return l === null ? null : this.timeOfLogical(l);
   }
 
@@ -101,7 +122,10 @@ export class DrawEngine {
   _installPrimitive() {
     const self = this;
     const paneView = {
-      zOrder: () => 'top',
+      // 'normal' = por encima de las velas pero POR DEBAJO del crosshair (con
+      // 'top' un relleno opaco se comía la cruz). De paso, el lienzo del panel
+      // deja de repintarse en cada movimiento del ratón.
+      zOrder: () => 'normal',
       renderer: () => ({
         draw(target) {
           target.useMediaCoordinateSpace(({ context, mediaSize }) => {
@@ -116,16 +140,27 @@ export class DrawEngine {
     this.primitive = {
       attached: (p) => { self.requestUpdate = p.requestUpdate; },
       detached: () => { self.requestUpdate = null; },
-      updateAllViews: () => {},
+      updateAllViews: () => self._syncAxisViews(),
       // Los dibujos NO estiran la escala: al pulsar AUTO solo mandan las
       // velas (RF-5.10). Queda la palanca para poder demostrar en el test que
       // la primitive SÍ está siendo consultada — si no, el check pasaría
       // igual aunque estuviera desconectada.
-      autoscaleInfo: () => {
+      autoscaleInfo: (from, to) => {
         if (!self.autoscaleWithShapes || !self.autoscaleWithShapes()) return null;
-        const ps = self.shapes.flatMap(x => x.points.map(q => q.p));
-        if (!ps.length) return null;
-        return { priceRange: { minValue: Math.min(...ps), maxValue: Math.max(...ps) } };
+        let min = Infinity, max = -Infinity;
+        for (const x of self.shapes) {
+          // Las horizontales se pintan de lado a lado: cuentan siempre. El
+          // resto, solo si caen dentro del rango visible que nos pasan (si no,
+          // una figura lejana aplastaría las velas para siempre).
+          const anchas = TYPES[x.type].priceLabel;
+          for (const q of x.points) {
+            const l = self.logicalOf(q.t);
+            if (!anchas && (l === null || l < from || l > to)) continue;
+            if (q.p < min) min = q.p;
+            if (q.p > max) max = q.p;
+          }
+        }
+        return min <= max ? { priceRange: { minValue: min, maxValue: max } } : null;
       },
       paneViews: () => self._paneViews,
       priceAxisViews: () => self._axisViews,
@@ -183,7 +218,8 @@ export class DrawEngine {
         const y = this.yOf(p.p);
         if (y === null) return;
         views.push({
-          coordinate: () => y,
+          // viva, no capturada: si no, la etiqueta va un repintado por detrás
+          coordinate: () => this.yOf(p.p) ?? y,
           text: () => fmtPrice(p.p),
           textColor: () => '#111111',
           backColor: () => style.color,
@@ -203,6 +239,11 @@ export class DrawEngine {
     c.addEventListener('pointermove', (e) => this._onMoveHover(e), true);
     addEventListener('pointermove', (e) => this._onDrag(e), true);
     addEventListener('pointerup', (e) => this._onUp(e), true);
+    // Un gesto puede morir sin pointerup (Alt+Tab con el botón pulsado, o un
+    // pointercancel del navegador). Sin esto el arrastre seguía vivo y la
+    // figura se movía con el ratón SIN botón hasta el siguiente click.
+    addEventListener('pointercancel', () => this._onUp(), true);
+    addEventListener('blur', () => this._onUp());
     addEventListener('keydown', (e) => this._onKey(e));
     addEventListener('resize', () => { this._paneRect = null; });
     c.addEventListener('contextmenu', (e) => {
@@ -255,7 +296,9 @@ export class DrawEngine {
     if (e.button !== 0) return;
     const p = this._pos(e, true);   // al pulsar sí se remide: el layout pudo cambiar
     if (!p || !p.inside) return;
-    const take = () => { e.preventDefault(); e.stopPropagation(); this._lockChart(true); };
+    // Cortar la propagación basta para que LWC no vea el gesto; el candado
+    // del paneo se echa solo al empezar un arrastre de verdad (_startDrag).
+    const take = () => { e.preventDefault(); e.stopPropagation(); };
 
     // 1) creación en curso
     if (this.pending) { take(); this._addPendingPoint(p); return; }
@@ -294,33 +337,46 @@ export class DrawEngine {
     this._select(null);
   }
 
-  _pt(p) { return { t: this.timeOfX(p.x), p: this.priceOfY(p.y) }; }
+  // Un punto solo vale si las dos conversiones han salido bien: si no, se
+  // acabaría guardando {t:null,p:null}, que al recargar rompe el pintado.
+  _pt(q) {
+    const t = this.timeOfX(q.x), p = this.priceOfY(q.y);
+    return Number.isFinite(t) && Number.isFinite(p) ? { t, p } : null;
+  }
+
+  static valido(s) {
+    return Array.isArray(s.points) && s.points.length > 0
+      && s.points.every(q => Number.isFinite(q.t) && Number.isFinite(q.p));
+  }
 
   _startDrag(mode, idx, p, shift) {
     const s = this.selected();
     if (!s) return;
+    this._lockChart(true);
     this.drag = {
       mode, idx, shift,
       x0: p.x, y0: p.y,
-      l0: this.chart.timeScale().coordinateToLogical(p.x),
+      l0: this.logicalOfX(p.x),
       snap: s.points.map(q => ({ l: this.logicalOf(q.t), y: this.yOf(q.p) })),
     };
   }
 
   _onDrag(e) {
     if (!this.drag) return;
+    if (e.buttons === 0) { this._onUp(); return; }   // el botón ya no está pulsado
     const s = this.selected();
     if (!s) return;
     e.preventDefault(); e.stopPropagation();
     const r = this.paneRect();
     const x = e.clientX - r.left, y = e.clientY - r.top;
-    const dl = this.chart.timeScale().coordinateToLogical(x) - this.drag.l0;
+    const dl = this.logicalOfX(x) - this.drag.l0;
     const dy = y - this.drag.y0;
     const type = TYPES[s.type];
 
     const move = (i) => {
       const snap = this.drag.snap[i];
-      s.points[i] = { t: this.timeOfLogical(snap.l + dl), p: this.priceOfY(snap.y + dy) };
+      const t = this.timeOfLogical(snap.l + dl), pr = this.priceOfY(snap.y + dy);
+      if (Number.isFinite(t) && Number.isFinite(pr)) s.points[i] = { t, p: pr };
     };
     if (this.drag.mode === 'move') {
       s.points.forEach((_, i) => move(i));
@@ -337,8 +393,9 @@ export class DrawEngine {
         const snap = this.drag.snap[tg.i];
         if (!snap) continue;
         const q = s.points[tg.i];
-        if (tg.axes.includes('x')) q.t = this.timeOfLogical(snap.l + dl);
-        if (tg.axes.includes('y')) q.p = this.priceOfY(snap.y + dy);
+        const t = this.timeOfLogical(snap.l + dl), pr = this.priceOfY(snap.y + dy);
+        if (tg.axes.includes('x') && Number.isFinite(t)) q.t = t;
+        if (tg.axes.includes('y') && Number.isFinite(pr)) q.p = pr;
       }
       if (type.linked) {   // el tiempo de las dos líneas de la zona va unido
         const t = s.points[this.drag.idx].t;
@@ -349,10 +406,12 @@ export class DrawEngine {
   }
 
   _onUp() {
+    // Siempre se suelta el candado, aunque no hubiera arrastre: si no, un
+    // simple click de creación dejaba el gráfico sin paneo para siempre.
+    this._lockChart(false);
     if (!this.drag) return;
     const s = this.selected();
     this.drag = null;
-    this._lockChart(false);
     if (s) this.save(s);
   }
 
@@ -364,26 +423,28 @@ export class DrawEngine {
   }
 
   _onKey(e) {
+    // "Escribiendo" es solo un campo de texto: los sliders y el selector de
+    // color son <input> igualmente, y con ellos Supr debe seguir borrando.
+    const el = document.activeElement;
+    const escribiendo = !!el && (el.isContentEditable || el.tagName === 'TEXTAREA'
+      || (el.tagName === 'INPUT' && /^(text|search|url|email|number|password|tel)$/.test(el.type)));
     if (e.key === 'Escape') {
+      if (escribiendo) { el.blur(); return; }
       if (this.pending) this.setTool(null);
+      else if (this.armed) { this.armed = false; this.container.style.cursor = ''; }
       else if (this.measure) { this.measure = null; this.redraw(); }
       else this._select(null);
       return;
     }
-    // Supr borra salvo que se esté escribiendo (el panel tiene un campo de
-    // texto). Antes se exigía foco en <body>, y tras pulsar un botón de la
-    // barra el foco se quedaba ahí: la tecla no hacía nada.
-    if (e.key === 'Delete' || e.key === 'Backspace') {
-      const el = document.activeElement;
-      const escribiendo = el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
-      if (!escribiendo) this.deleteSelected();
-    }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && !escribiendo) this.deleteSelected();
   }
 
   // Mientras arrastramos un dibujo, el gráfico no se desplaza ni con el ratón
   // ni con inercia. Es redundante con el stopPropagation, pero cubre el caso
   // de que LWC escuche el movimiento en document.
   _lockChart(on) {
+    if (this.locked === on) return;
+    this.locked = on;
     this.chart.applyOptions(on
       ? { handleScroll: false }
       : { handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true } });
@@ -391,6 +452,7 @@ export class DrawEngine {
 
   // ---------- creación ----------
   setTool(type) {
+    this.armed = false;              // elegir herramienta cancela el modo medir
     this.pending = type ? { type, pts: [] } : null;
     this.container.style.cursor = type ? 'crosshair' : '';
     // Al empezar a dibujar se deselecciona: si no, el panel de configuración
@@ -405,14 +467,16 @@ export class DrawEngine {
   // Igual que shift+click, pero desde el botón de la barra: la medición
   // arranca en el siguiente click sobre el gráfico.
   armMeasure() {
+    this.setTool(null);              // primero limpia, después arma
     this.armed = true;
-    this.setTool(null);
     this.container.style.cursor = 'crosshair';
   }
 
   _addPendingPoint(p) {
     const { type } = this.pending;
-    this.pending.pts.push(this._pt(p));
+    const punto = this._pt(p);
+    if (!punto) return;              // conversión imposible: se ignora el click
+    this.pending.pts.push(punto);
     const need = TYPES[type].points;
     if (this.pending.pts.length < need) { this.redraw(); return; }
     const points = this.pending.pts.slice();
@@ -441,7 +505,7 @@ export class DrawEngine {
   _pendingPreview() {
     const { type, pts } = this.pending;
     const need = TYPES[type].points;
-    const all = [...pts, this._pt(this.cursor)];
+    const all = [...pts, this._pt(this.cursor) || pts[pts.length - 1]];
     while (all.length < need) all.push(all[all.length - 1]);
     const points = all.slice(0, need);
     if (TYPES[type].linked) points.forEach(q => { q.t = points[0].t; });
@@ -512,6 +576,7 @@ export class DrawEngine {
     this.timers.set(s.id, setTimeout(() => {
       // Segunda red: la figura pudo borrarse mientras el debounce esperaba.
       if (!this.shapes.some(x => x.id === s.id)) return;
+      if (!DrawEngine.valido(s)) return;         // nunca se guarda un punto roto
       this.onSave(s.id, this.toJSON(s));
     }, PERSIST_MS));
   }
@@ -529,6 +594,7 @@ export class DrawEngine {
   load(rows) {
     for (const { id, payload } of rows) {
       if (!payload || payload.kind !== 'shape' || !TYPES[payload.type]) continue;
+      if (!DrawEngine.valido(payload)) continue;   // fila corrupta: se ignora
       this.shapes.push({
         id, type: payload.type,
         points: payload.points.map(p => ({ t: p.t, p: p.p })),

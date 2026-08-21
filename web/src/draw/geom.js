@@ -120,5 +120,6 @@ export function fmtDuration(seconds) {
 
 // Precio con los decimales justos para BTC (2) y separador de miles.
 export function fmtPrice(p) {
+  if (!Number.isFinite(p)) return '—';
   return p.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }

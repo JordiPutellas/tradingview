@@ -360,7 +360,13 @@ configuración). Lo que hay que saber para operarlo:
 
 - Los eventos se capturan **en fase de captura** sobre `#chart` y, cuando el
   gesto es nuestro, se corta la propagación: por eso arrastrar un dibujo ya no
-  mueve el gráfico. Si alguna vez vuelve a moverse, mirar ahí primero.
+  mueve el gráfico. Si alguna vez vuelve a moverse, mirar ahí primero. El
+  candado de `handleScroll` se echa solo al empezar un arrastre y se suelta en
+  CUALQUIER `pointerup`, `pointercancel` o pérdida de foco: si el gráfico deja
+  de panearse, es que ese camino se rompió.
+- **Trampa 14 del README**: `logicalToCoordinate` devuelve 0 con índices
+  fraccionarios y `coordinateToLogical` redondea. Todo lo que toque
+  coordenadas debe pasar por `xOf`/`logicalOfX`, que interpolan.
 - Las figuras se guardan en `(tiempo UTC, precio)` y se pintan pasando por el
   **índice lógico fraccionario**, no por `timeToCoordinate`: así se pueden
   colocar entre velas y a la derecha de la última.

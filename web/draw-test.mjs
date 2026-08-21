@@ -192,6 +192,49 @@ for (const [tool, pts] of HERRAMIENTAS) await crear(tool, pts);   // repuebla pa
 await page.mouse.click(825, 360);
 await wait(300);
 
+// ---------------------------- 2c. control espejo: el gráfico SÍ se panea
+// La suite demuestra que arrastrar un dibujo no mueve el gráfico; hace falta
+// lo contrario, o un candado pegado (handleScroll:false) pasaría inadvertido.
+const rangoOriginal = (await estado()).rango;
+const panear = async () => {
+  // punto de agarre garantizado sin figuras debajo (las hay repartidas)
+  const punto = await page.evaluate(() => {
+    const e = window.__test.engine, r = e.paneRect();
+    for (let y = r.height - 40; y > 60; y -= 15) {
+      if (![500, 700, 900, 1100].some(x => e._shapeAt(x, y))) return { x: r.left + 1100, y: r.top + y };
+    }
+    return null;
+  });
+  if (!punto) return { movido: false, nota: 'sin hueco libre' };
+  const r0 = (await estado()).rango;
+  await arrastrar(punto.x, punto.y, punto.x - 200, punto.y);
+  const r1 = (await estado()).rango;
+  return { r0, r1, movido: Math.abs(r1.from - r0.from) > 1 };
+};
+const trasCrear = await panear();
+check('arrastrar el fondo SÍ panea el gráfico tras crear figuras',
+  trasCrear.movido, `${trasCrear.r0?.from} → ${trasCrear.r1?.from}`);
+check('handleScroll queda restaurado',
+  await page.evaluate(() => window.__test.chart.options().handleScroll.pressedMouseMove === true));
+await page.keyboard.down('Shift'); await page.mouse.click(600, 300); await page.keyboard.up('Shift');
+await wait(200);
+await page.mouse.click(700, 350); await wait(200);   // fija la medición
+await page.mouse.click(700, 350); await wait(200);   // la borra
+const trasMedir = await panear();
+check('arrastrar el fondo SÍ panea el gráfico tras medir', trasMedir.movido,
+  `${trasMedir.r0?.from} → ${trasMedir.r1?.from}`);
+// deja la vista como estaba: lo que sigue usa coordenadas fijas
+await page.evaluate((r) => window.__test.chart.timeScale().setVisibleLogicalRange(r), rangoOriginal);
+await wait(500);
+const centroRect0 = await page.evaluate(() => {
+  const e = window.__test.engine;
+  const s = e.shapes.find(x => x.type === 'rect');
+  const pts = e.screenPoints(s), r = e.paneRect();
+  return { x: r.left + (pts[0].x + pts[1].x) / 2, y: r.top + (pts[0].y + pts[1].y) / 2 };
+});
+await page.mouse.click(centroRect0.x, centroRect0.y);   // lo que sigue lo espera seleccionado
+await wait(300);
+
 // ------------------------------------------------ 3. selección y handles
 const conSeleccion = await pixeles();
 check('el dibujo seleccionado muestra puntos de control',
@@ -342,20 +385,80 @@ const antesTF = (await estado()).figuras.find(f => f.type === 'trend');
 await page.click('button[data-tf="1h"]');
 await page.waitForFunction(() => window.__test.getTF().name === '1h' && window.__test.getBars().length > 100, { timeout: 20000 });
 await wait(800);
-const enOtroTF = (await estado()).figuras.find(f => f.type === 'trend');
-check('los dibujos sobreviven al cambio de timeframe',
-  enOtroTF && enOtroTF.pts[0].t === antesTF.pts[0].t && Math.abs(enOtroTF.pts[0].p - antesTF.pts[0].p) < 1e-6,
-  `t=${antesTF.pts[0].t} p=${antesTF.pts[0].p.toFixed(2)}`);
-const xEnOtroTF = await page.evaluate(() => {
-  const e = window.__test.engine;
-  const s = e.shapes.find(x => x.type === 'trend');
-  return e.screenPoints(s)?.[0]?.x ?? null;
-});
-check('y se pintan en una coordenada válida del nuevo timeframe',
-  xEnOtroTF !== null && Number.isFinite(xEnOtroTF), `x=${xEnOtroTF && xEnOtroTF.toFixed(0)}`);
+// Efecto, no intención: dónde PINTA el motor el primer punto frente a dónde
+// dice LWC que cae ese instante (camino independiente, timeToCoordinate sobre
+// la vela más cercana). Si el mapeo tiempo→x estuviera roto, no cuadrarían.
+const cotejo = await page.evaluate((t) => {
+  const { engine, chart, getBars } = window.__test;
+  const s = engine.shapes.find(x => x.type === 'trend');
+  const pintado = engine.screenPoints(s)?.[0]?.x ?? null;
+  const bars = getBars();
+  let cerca = bars[0];
+  for (const b of bars) if (Math.abs(b[0] - t) < Math.abs(cerca[0] - t)) cerca = b;
+  const segunLWC = chart.timeScale().timeToCoordinate(cerca[0]);
+  const ancho = chart.timeScale().width() / Math.max(1, bars.length);
+  return { pintado, segunLWC, tolerancia: Math.max(4, ancho * 2), t, tBarra: cerca[0] };
+}, antesTF.pts[0].t);
+check('tras cambiar de timeframe el dibujo se pinta donde toca',
+  cotejo.pintado !== null && cotejo.segunLWC !== null
+  && Math.abs(cotejo.pintado - cotejo.segunLWC) <= cotejo.tolerancia,
+  `pintado en x=${cotejo.pintado?.toFixed(1)}, LWC dice x=${cotejo.segunLWC?.toFixed(1)} (tol ${cotejo.tolerancia?.toFixed(1)})`);
+const mismoPrecio = await page.evaluate((p) => {
+  const { engine, series } = window.__test;
+  const s = engine.shapes.find(x => x.type === 'trend');
+  return { y: engine.screenPoints(s)?.[0]?.y, yEsperada: series.priceToCoordinate(p) };
+}, antesTF.pts[0].p);
+check('y a la altura de su precio', Math.abs(mismoPrecio.y - mismoPrecio.yEsperada) < 1,
+  `y=${mismoPrecio.y?.toFixed(1)} esperada=${mismoPrecio.yEsperada?.toFixed(1)}`);
 await page.click('button[data-tf="1m"]');
 await page.waitForFunction(() => window.__test.getTF().name === '1m' && window.__test.getBars().length > 100, { timeout: 20000 });
 await wait(600);
+
+// ------------------------- 7c. modos que no se quedan pegados (revisión F3)
+await page.click('button[data-tool="__measure"]');
+await wait(150);
+const armado = await page.evaluate(() => window.__test.engine.armed === true);
+await page.click('button[data-tool="trend"]');
+await wait(150);
+const trasElegirHerramienta = await page.evaluate(() => window.__test.engine.armed === true);
+await page.keyboard.press('Escape');
+await wait(150);
+check('elegir herramienta cancela el modo medir',
+  armado && trasElegirHerramienta === false, `armado=${armado} tras herramienta=${trasElegirHerramienta}`);
+await page.click('button[data-tool="__measure"]');
+await wait(150);
+await page.keyboard.press('Escape');
+await wait(150);
+check('Escape sale del modo medir',
+  await page.evaluate(() => window.__test.engine.armed === false));
+
+// un gesto que muere sin pointerup no puede dejar la figura pegada al ratón
+const antesZombi = (await estado()).figuras.find(f => f.type === 'trend');
+const gTrend = await page.evaluate(() => {
+  const e = window.__test.engine;
+  const s = e.shapes.find(x => x.type === 'trend');
+  const pts = e.screenPoints(s), r = e.paneRect();
+  return { x: r.left + (pts[0].x + pts[1].x) / 2, y: r.top + (pts[0].y + pts[1].y) / 2 };
+});
+await page.mouse.click(gTrend.x, gTrend.y);
+await wait(200);
+await page.mouse.move(gTrend.x, gTrend.y);
+await page.mouse.down();
+await page.mouse.move(gTrend.x + 30, gTrend.y + 10);
+await page.evaluate(() => dispatchEvent(new PointerEvent('pointercancel', { bubbles: true })));
+await wait(200);
+const dragMuerto = await page.evaluate(() => window.__test.engine.drag === null);
+const trasCancelar = (await estado()).figuras.find(f => f.type === 'trend');
+await page.mouse.move(gTrend.x + 300, gTrend.y + 150);   // sin botón: no debe arrastrar
+await wait(300);
+const trasMover = (await estado()).figuras.find(f => f.type === 'trend');
+await page.mouse.up();
+check('un arrastre cancelado no deja la figura pegada al ratón',
+  dragMuerto && Math.abs(trasMover.pts[0].p - trasCancelar.pts[0].p) < 1e-9
+  && trasMover.pts[0].t === trasCancelar.pts[0].t,
+  `drag=${dragMuerto ? 'null' : 'vivo'} · Δp tras mover=${(trasMover.pts[0].p - trasCancelar.pts[0].p).toFixed(4)}`);
+await page.keyboard.press('Escape');
+await wait(200);
 
 // -------------------------------------------------------------- 8. medición
 await page.keyboard.press('Escape');
@@ -391,6 +494,49 @@ check('fijada, deja de seguir al cursor', Math.abs(medQuieta.delta - medFija.del
 await page.mouse.click(900, 300);
 await wait(300);
 check('otro click la elimina', (await page.evaluate(() => window.__test.engine.measureInfo())) === null);
+
+// ------------------------- 8b. robustez: una fila corrupta no rompe el resto
+await page.evaluate(() => fetch('/api/drawings/zz-corrupta', {
+  method: 'PUT', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ kind: 'shape', v: 1, type: 'hline',
+    points: [{ t: null, p: null }], style: { color: '#ff0000', width: 2, opacity: 1, fill: '#ff0000', fillOpacity: 0.1, dash: false } }),
+}));
+await page.reload();
+await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
+await wait(800);
+const conBasura = await page.evaluate(() => ({
+  figuras: window.__test.engine.shapes.length,
+  velas: window.__test.getBars().length,
+  tipos: window.__test.engine.shapes.map(s => s.type),
+}));
+check('una fila corrupta se ignora y el gráfico sigue vivo',
+  conBasura.velas > 100 && !conBasura.tipos.includes(undefined) && conBasura.figuras > 0,
+  `${conBasura.figuras} figuras cargadas, ${conBasura.velas} velas`);
+const pxTrasBasura = await pixeles();
+check('y el lienzo se sigue pintando', Object.keys(pxTrasBasura).length > 3);
+await page.evaluate(() => fetch('/api/drawings/zz-corrupta', { method: 'DELETE' }));
+
+// el crosshair no puede quedar tapado por un relleno opaco
+await crear('rect', [[500, 300], [900, 500]]);
+await page.evaluate(() => {
+  const e = window.__test.engine;
+  const r = e.shapes.find(s => s.type === 'rect');
+  if (r) { r.style.fill = '#00ff00'; r.style.fillOpacity = 1; e.redraw(); }
+});
+const centro = await page.evaluate(() => {
+  const e = window.__test.engine;
+  const s = e.shapes.find(x => x.type === 'rect');
+  if (!s) return null;
+  const pts = e.screenPoints(s), r = e.paneRect();
+  return { x: r.left + (pts[0].x + pts[1].x) / 2, y: r.top + (pts[0].y + pts[1].y) / 2 };
+});
+if (centro) {
+  await page.mouse.move(centro.x, centro.y);
+  await wait(400);
+  const px = await pixeles();
+  check('el crosshair se ve por encima de un relleno opaco', (px['30,30,30'] || 0) > 100,
+    `${px['30,30,30'] || 0} px de crosshair`);
+}
 
 // --------------------------------------------------- 9. limpieza final
 await page.evaluate(async () => {
