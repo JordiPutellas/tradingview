@@ -12,7 +12,7 @@ services:
     mem_limit: 768m
     environment:
       POSTGRES_USER: btc
-      POSTGRES_PASSWORD: btc
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-btc}
       POSTGRES_DB: btc
       TS_TUNE_MEMORY: 512MB
       TS_TUNE_NUM_CPUS: "2"
@@ -42,11 +42,14 @@ services:
       timescaledb:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://btc:btc@timescaledb:5432/btc
+      DATABASE_URL: postgres://btc:${POSTGRES_PASSWORD:-btc}@timescaledb:5432/btc
       SYMBOL: BTCUSDT
       RECONCILE_WINDOW: 40h
       HEALTH_ADDR: ":8080"
-      # HEALTHCHECK_URL: https://hc-ping.com/<uuid>   # activar en producción
+      # La config específica del servidor va SIEMPRE en .env (gitignorado),
+      # NUNCA editando este fichero: el rsync de deploy lo pisa (pasó con la
+      # monitorización durante F1b — fallo silencioso del propio avisador).
+      HEALTHCHECK_URL: ${HEALTHCHECK_URL:-}
     ports:
       - "127.0.0.1:8081:8080"
 

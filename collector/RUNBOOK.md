@@ -13,6 +13,13 @@ F1a están en las secciones 2-5, **verificados en el VPS `jordios` el
 - Todo `ports:` con bind explícito `127.0.0.1` (Docker se salta UFW).
 - Ruta en el servidor: `~/btcdash/collector`. Deploy: `rsync` desde el repo y
   `docker compose up -d --build`.
+- **Config específica del servidor SIEMPRE en `~/btcdash/collector/.env`**
+  (gitignorado), nunca editando ficheros versionados: el `rsync` del deploy
+  los pisa. Lección aprendida en F1b: la `HEALTHCHECK_URL` activada a mano en
+  el compose del servidor fue pisada por un deploy y la monitorización quedó
+  muda sin que nadie avisara — porque lo que dejó de avisar era el propio
+  avisador. Variables actuales en `.env`: `HEALTHCHECK_URL` (y opcionalmente
+  `POSTGRES_PASSWORD`).
 
 ## 1. Arranque
 
@@ -111,10 +118,11 @@ Campos: `status` (ok/stale — stale devuelve HTTP 503), `ws_connected`,
 métrica anti-zombi: un WS conectado que no entrega datos dispara esto, no el
 uptime del proceso), `last_candle_ts`, `buffer_len`, `open_gaps`.
 
-### Alta en healthchecks.io (pendiente — pasos exactos)
+### Alta en healthchecks.io — ✅ HECHO y probado en producción
 
-El colector ya emite pings si `HEALTHCHECK_URL` está definida, y funciona
-igual sin fallar si está vacía (estado actual). Cuando crees la cuenta:
+Montado el 2026-08-21 (avisó por Telegram del reinicio de kernel). La URL del
+check vive en `~/btcdash/collector/.env` como `HEALTHCHECK_URL` (ver §0).
+Pasos originales por si hay que recrearlo:
 
 1. Crea un check en healthchecks.io llamado `btcdash-collector`.
 2. Configuración recomendada: **Period = 1 minuto, Grace = 10 minutos**.
@@ -232,11 +240,18 @@ la mitad de su `mem_limit` y el sistema conserva >2,5 GiB disponibles y swap
 intacto. El backfill (el pico de I/O y RAM de la vida del sistema) ya pasó.
 Revisar solo si F1c (API) cambia el patrón de lecturas.
 
-## 7d. Reinicio de kernel PENDIENTE
+## 7d. Reinicio del servidor — ✅ VERIFICADO (2026-08-21, kernel 6.8.0-138)
 
-El VPS corre el kernel 6.8.0-137 con el 138 ya instalado: hay un reinicio
-pendiente. **No se ha reiniciado** (decisión: lo hace el usuario cuando le
-convenga, Hermes también se ve afectado). Checklist post-reinicio:
+El reinicio de kernel se hizo y el checklist pasó entero: los contenedores
+arrancaron solos y el hueco del reinicio (gap 7) se reconcilió en 6 s.
+
+**Advertencia aprendida:** `restart: unless-stopped` NO rearranca un
+contenedor que estaba PARADO A MANO antes del reinicio (ese es justo el
+significado de "unless stopped"). En un reinicio planificado con el colector
+parado (p. ej. durante un backfill), tras el boot hay que hacer
+`docker compose up -d collector` explícitamente.
+
+Checklist post-reinicio (para la próxima vez):
 
 1. `ssh jordios` entra (Tailscale arriba).
 2. Hermes: `docker ps` muestra `jordios-postgres` healthy y su agente activo.
