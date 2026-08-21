@@ -153,8 +153,8 @@ Si LWC v5 + plugin de dibujo resulta inviable (drag/hit-testing inestable, rendi
 
 ### RF-7 — Corrección batch de fidelidad (F1b, NO en el colector)
 
-- **RF-7.1** Job T+1 que recalcula las velas 1s del día anterior desde `futures/um/daily/trades` (trades individuales, con CHECKSUM) y sobreescribe las velas aproximadas marcándolas `quality='exact_t1'`. F0 demostró que las klines oficiales se reconstruyen exactas 1440/1440 desde ese fichero; coste ~41 MB/día
-- **RF-7.2** Los timeframes ≥1m se sobreescriben con las klines oficiales de data.binance.vision: pasa de 96,7% de minutos exactos (límite del dato aggTrade) a 100%, gratis
+- **RF-7.1** Job T+1 que recalcula las velas 1s del día anterior desde `futures/um/daily/trades` (trades individuales, con CHECKSUM) y sobreescribe las velas aproximadas marcándolas `quality='exact_t1'`. F0 demostró que las klines oficiales se reconstruyen exactas 1440/1440 desde ese fichero; coste ~41 MB/día. **Política retroactiva (decidida en F1b): solo hacia adelante por defecto** — corregir los 2 años backfilleados costaría ~30 GB de descarga y horas de proceso para un sesgo cosmético (el volumen diario cuadra al satoshi; solo se desplaza entre segundos adyacentes); `t1 -from -to` acepta cualquier rango si algún día hace falta
+- **RF-7.2** Los timeframes ≥1m se sobreescriben con las klines oficiales de data.binance.vision: pasa de 96,7% de minutos exactos (límite del dato aggTrade) a 100%, gratis. Las filas `official` llevan `first/last_agg_id` y `agg_count` a 0 (las klines no traen aggTradeIds); la trazabilidad de huecos vive en `candles_1s`
 
 ---
 

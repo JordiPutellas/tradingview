@@ -29,9 +29,9 @@ y flujo de velas.
 Variables útiles (ver `internal/config/config.go`): `RECONCILE_WINDOW` (40h),
 `HEALTHCHECK_URL`, `FRESHNESS_MAX` (30s), `WS_BASE_URL`.
 
-> **OJO (trampa 12):** el WS de futures exige la ruta `/market/ws`. La ruta
+> **OJO (trampa 11):** el WS de futures exige la ruta `/market/ws`. La ruta
 > antigua `/ws` conecta y NO envía aggTrades — en silencio. El default ya es
-> el correcto; no lo cambies sin leer la trampa 12 del README.
+> el correcto; no lo cambies sin leer la trampa 11 del README.
 
 ## 2. Criterio 1 — Ingiere en tiempo real
 
@@ -119,7 +119,7 @@ igual sin fallar si está vacía (estado actual). Cuando crees la cuenta:
 1. Crea un check en healthchecks.io llamado `btcdash-collector`.
 2. Configuración recomendada: **Period = 1 minuto, Grace = 10 minutos**.
    El colector pinga cada minuto SOLO si el dato está fresco (<30 s desde el
-   último aggTrade); si el stream se para —aunque el proceso viva, trampa 11—
+   último aggTrade); si el stream se para —aunque el proceso viva, trampas 5 y 11—
    el ping cesa y la alerta salta a los ~11 min. Margen de sobra dentro de la
    ventana REST de 48 h.
 3. Copia la URL del check (`https://hc-ping.com/<uuid>`) en
@@ -156,6 +156,42 @@ reservado al job T+1 de F1b.
 | Drill ingesta en tiempo real | ✅ 43 velas 1s en 43 s, precios reales, rollup 1m funcionando (job SQL cada minuto) |
 | Drill desconexión forzada del WS | ✅ corte de red de 3 min: idle-timeout 90 s → backoff 16/32/64 s → reconexión → hueco de 3.082 aggTrades reconciliado en 3,3 s, 181 velas `reconciled`, gap `resolved`. NOTA: un corte <90 s lo absorbe TCP sin pérdida ni reconexión (verificado con un corte de 34 s) |
 | Drill hueco provocado (stop 4 min) | ✅ apagado ordenado (última vela = último segundo antes del stop), rearranque con gap `reason='restart'` de 12.381 aggTrades reconciliado en 11 s; segundo frontera reconstruido completo desde `first_agg_id` |
+
+## 6b. Operaciones F1b: histórico y corrección T+1
+
+Comandos (todos idempotentes y reanudables; progreso en `backfill_progress` y
+`job_progress`):
+
+```bash
+# 1m oficial desde el origen del par (2019-09-08): meses completos desde el
+# ZIP mensual (2020-01+), 2019 y el mes en curso vía REST. Puede correr en
+# caliente. quality='official'; el rollup desde 1s nunca las pisa.
+docker compose run --rm collector backfill-1m
+
+# 1s desde aggTrades diarios. PARAR EL COLECTOR ANTES (RUNBOOK §8:
+# backpressure). Procesa y borra día a día; aborta si el disco baja del
+# umbral (-min-free-gb, por defecto 5).
+docker compose stop collector
+nohup docker compose run --rm collector backfill -from 2024-08-21 -to 2026-08-20 > ~/btcdash/backfill-1s.log 2>&1 &
+# ... al terminar:
+docker compose start collector   # el hueco se reconcilia solo por REST (<40h)
+
+# Corrección T+1 (diaria por cron, ver abajo). Manual:
+docker compose run --rm collector t1                    # continúa hasta ayer
+docker compose run --rm collector t1 -from X -to Y      # rango arbitrario (retroactivo bajo demanda)
+
+# Huecos pending_bulk desde ficheros diarios:
+docker compose run --rm collector resolve-gaps
+```
+
+**Cron instalado** (usuario `jordi`, servidor en UTC): `t1` + `resolve-gaps`
+diario a las **09:40 UTC** (los ficheros se publican ~08:00-09:00; si aún no
+están, `t1` sale limpio y recupera el día al día siguiente). Log:
+`~/btcdash/t1.log`. Ver: `crontab -l`.
+
+El log del T+1 reporta por día: velas corregidas, % de segundos con volumen
+desplazado (esperado ~15-20% por el sesgo de frontera, F0), desviación máxima
+y media. Si esos números se disparan, algo ha cambiado en el dato de origen.
 
 ## 7b. Retención y purga manual
 

@@ -31,7 +31,7 @@ func FromEnv() (Config, error) {
 		Symbol:              getdef("SYMBOL", "BTCUSDT"),
 		// OJO: ruta /market/ws, no /ws. Desde el 2026-03-06 las conexiones
 		// sin ruta solo reciben streams "public" y @aggTrade calla EN
-		// SILENCIO (trampa 12 del README).
+		// SILENCIO (trampa 11 del README).
 		WSBaseURL:           getdef("WS_BASE_URL", "wss://fstream.binance.com/market/ws"),
 		FapiBaseURL:         getdef("FAPI_BASE_URL", "https://fapi.binance.com"),
 		HealthAddr:          getdef("HEALTH_ADDR", ":8080"),
