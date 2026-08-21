@@ -25,6 +25,7 @@ type State struct {
 	lastTradeID  int64
 	lastCandleTs int64
 	lastWriteAt  time.Time
+	pingerOn     bool
 
 	// FreshnessMax define "fresco" para status y para el gate del pinger.
 	FreshnessMax time.Duration
@@ -40,6 +41,14 @@ func New(freshnessMax time.Duration) *State {
 func (s *State) SetWSConnected(v bool) {
 	s.mu.Lock()
 	s.wsConnected = v
+	s.mu.Unlock()
+}
+
+// SetPinger registra si la monitorización externa está activa, para que
+// /health lo diga: un HEALTHCHECK_URL vacío no puede detectarse desde fuera.
+func (s *State) SetPinger(on bool) {
+	s.mu.Lock()
+	s.pingerOn = on
 	s.mu.Unlock()
 }
 
@@ -76,6 +85,7 @@ type report struct {
 	LastWriteAt      string  `json:"last_write_at"`
 	BufferLen        int     `json:"buffer_len"`
 	OpenGaps         int     `json:"open_gaps"`
+	HealthcheckPing  bool    `json:"healthcheck_ping"` // false = monitorización externa OFF
 	UptimeSec        float64 `json:"uptime_seconds"`
 }
 
@@ -84,9 +94,10 @@ func (s *State) Handler() http.Handler {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		rep := report{
-			WSConnected: s.wsConnected,
-			LastTradeID: s.lastTradeID,
-			UptimeSec:   time.Since(s.startedAt).Seconds(),
+			WSConnected:     s.wsConnected,
+			LastTradeID:     s.lastTradeID,
+			HealthcheckPing: s.pingerOn,
+			UptimeSec:       time.Since(s.startedAt).Seconds(),
 		}
 		if !s.lastTradeAt.IsZero() {
 			rep.LastTradeAt = s.lastTradeAt.Format(time.RFC3339Nano)
@@ -137,7 +148,12 @@ func (s *State) Serve(ctx context.Context, addr string) {
 
 // RunPinger hace GET a url cada interval MIENTRAS el dato esté fresco.
 func (s *State) RunPinger(ctx context.Context, url string, interval time.Duration) {
+	s.SetPinger(url != "")
 	if url == "" {
+		// Sin URL no hay quien avise de que no hay quien avise: que al menos
+		// quede en el log y en /health (F1b: un deploy dejó la
+		// monitorización muda en silencio).
+		slog.Warn("HEALTHCHECK_URL vacío: monitorización externa DESACTIVADA (ponla en .env)")
 		return
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
