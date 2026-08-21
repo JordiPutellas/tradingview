@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"sync"
 	"time"
@@ -39,8 +40,27 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/drawings", s.handleListDrawings)
 	mux.HandleFunc("PUT /api/drawings/{id}", s.handlePutDrawing)
 	mux.HandleFunc("DELETE /api/drawings/{id}", s.handleDeleteDrawing)
-	mux.Handle("GET /", http.FileServer(http.Dir(s.StaticDir)))
+	mux.Handle("GET /", cacheHeaders(http.FileServer(http.Dir(s.StaticDir))))
 	return mux
+}
+
+// hashedAsset: bundles con hash de contenido en el nombre (app.<hash>.js).
+var hashedAsset = regexp.MustCompile(`\.[0-9a-f]{8}\.(js|css)$`)
+
+// cacheHeaders: el HTML se revalida SIEMPRE y los bundles con hash se cachean
+// para siempre. En F2b un deploy no se vio hasta abrir una ventana de
+// incógnito: el fichero nuevo estaba en el servidor (el grep lo confirmaba)
+// pero el navegador seguía sirviendo su copia de "app.js" — misma URL de
+// siempre y sin cabeceras que dijeran nada.
+func cacheHeaders(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hashedAsset.MatchString(r.URL.Path) {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -252,5 +272,8 @@ func (s *Server) handleDeleteDrawing(w http.ResponseWriter, r *http.Request) {
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	// Sin validadores, un navegador puede cachear un GET por heurística: velas
+	// viejas servidas como nuevas.
+	w.Header().Set("Cache-Control", "no-store")
 	json.NewEncoder(w).Encode(v)
 }
