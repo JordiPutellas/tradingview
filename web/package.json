@@ -1,0 +1,20 @@
+{
+  "name": "web",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "esbuild src/app.js --bundle --outfile=dist/app.js --minify && esbuild src/spike.js --bundle --outfile=dist/spike.js --minify && cp src/index.html dist/index.html"
+  },
+  "keywords": [],
+  "type": "commonjs",
+  "dependencies": {
+    "esbuild": "^0.28.2",
+    "lightweight-charts": "^5.2.1",
+    "lightweight-charts-drawing": "^0.1.1"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1"
+  }
+}

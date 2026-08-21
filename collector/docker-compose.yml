@@ -53,5 +53,25 @@ services:
     ports:
       - "127.0.0.1:8081:8080"
 
+  # API + frontend (F1c). El túnel de cloudflared ya apunta a 127.0.0.1:8080
+  # (con IP explícita); la API ocupa ese puerto y no hay que tocar el túnel.
+  api:
+    build: .
+    entrypoint: ["api"]
+    restart: unless-stopped
+    mem_limit: 256m
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://btc:${POSTGRES_PASSWORD:-btc}@timescaledb:5432/btc
+      SYMBOL: BTCUSDT
+      API_ADDR: ":8080"
+      STATIC_DIR: /srv/static
+    volumes:
+      - ./webdist:/srv/static:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+
 volumes:
   tsdata:
