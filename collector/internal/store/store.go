@@ -110,6 +110,20 @@ func (s *PG) UpsertCandles(ctx context.Context, cs []StoredCandle) error {
 	return nil
 }
 
+// NotifyCandle publica la vela por NOTIFY 'candle_update' para que la API la
+// reenvíe a los clientes WS. El colector la llama tras cada flush con la vela
+// más reciente del lote (una por ~300ms, no por vela).
+func (s *PG) NotifyCandle(ctx context.Context, c StoredCandle) error {
+	payload := fmt.Sprintf(`{"t":%d,"o":%s,"h":%s,"l":%s,"c":%s,"v":%s}`,
+		c.TsSec, e8str(c.Open), e8str(c.High), e8str(c.Low), e8str(c.Close), e8str(c.Volume))
+	_, err := s.Pool.Exec(ctx, `SELECT pg_notify('candle_update', $1)`, payload)
+	return err
+}
+
+func e8str(v int64) string {
+	return fmt.Sprintf("%d.%08d", v/100_000_000, v%100_000_000)
+}
+
 func (s *PG) LastCandle(ctx context.Context, symbol string) (*StoredCandle, error) {
 	var c StoredCandle
 	var ts time.Time

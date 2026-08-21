@@ -73,7 +73,9 @@ func (c *Collector) Run(ctx context.Context) error {
 	})
 
 	// Bucle principal: único consumidor del pipeline (el orden es sagrado).
-	ticker := time.NewTicker(time.Second)
+	// 300ms: la vela en curso llega al frontend dentro del presupuesto de
+	// latencia de RNF-2 (<500ms) vía flush del writer + NOTIFY.
+	ticker := time.NewTicker(300 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
@@ -287,6 +289,21 @@ func (c *Collector) writer(done chan struct{}) {
 				if c.Health != nil {
 					c.Health.CandleWritten(batch[len(batch)-1].TsSec)
 				}
+				// Publicar la vela más reciente para el streaming de la API
+				// (RF-4.2). Best-effort: si falla, el siguiente tick la trae.
+				if n, ok := c.Store.(interface {
+					NotifyCandle(context.Context, store.StoredCandle) error
+				}); ok {
+					latest := batch[0]
+					for _, sc := range batch[1:] {
+						if sc.TsSec > latest.TsSec {
+							latest = sc
+						}
+					}
+					if err := n.NotifyCandle(ctx, latest); err != nil {
+						slog.Debug("notify candle failed", "err", err)
+					}
+				}
 				return
 			}
 			slog.Error("db write failed, retrying", "err", err, "batch", len(batch))
@@ -298,7 +315,7 @@ func (c *Collector) writer(done chan struct{}) {
 			}
 		}
 	}
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(300 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
