@@ -109,6 +109,10 @@ const chart = createChart(container, {
   grid: { vertLines: { visible: false }, horzLines: { visible: false } },
   timeScale: {
     timeVisible: true, secondsVisible: false, borderColor: '#4a4a4a',
+    // Con el 0,5 por defecto solo caben ~2.600 velas en pantalla: al pedir
+    // más, LWC recortaba el ancho de la ventana pero respetaba su posición y
+    // el gráfico se quedaba fuera de la vista. Con 0,05 caben ~26.000.
+    minBarSpacing: 0.05,
     tickMarkFormatter: (t, type) => fmtTick(t, type),
   },
   localization: { timeFormatter: (t) => fmtFull(t) },
@@ -141,11 +145,25 @@ container.addEventListener('wheel', (e) => {
   e.preventDefault();
   const notches = Math.max(-3, Math.min(3, e.deltaMode === 1 ? e.deltaY / 3 : e.deltaY / 100));
   const span = range.to - range.from;
-  const newSpan = Math.max(6, Math.min(span * Math.pow(1 + CONFIG.wheelZoom, notches), 5e6));
   const width = ts.width() || container.clientWidth;
   const frac = Math.min(1, Math.max(0, (e.clientX - container.getBoundingClientRect().left) / width));
   const anchor = range.from + frac * span;
-  ts.setVisibleLogicalRange({ from: anchor - frac * newSpan, to: anchor + (1 - frac) * newSpan });
+
+  // Topes: al fijar el rango lógico a mano nos saltamos los límites que LWC
+  // aplica en su propio zoom, y alejando sin freno el gráfico acababa
+  // empujado fuera de la pantalla — solo fondo. El tope de alejamiento es
+  // "todo lo cargado" (que crece solo al desplazarse al pasado) y la ventana
+  // se recoloca para que SIEMPRE queden velas a la vista.
+  const n = bars.length || 1;
+  const gap = Math.min(60, Math.max(3, n * 0.05));  // margen a los lados, en velas
+  const maxSpan = n + 2 * gap;                      // alejarse más no enseña nada nuevo
+  const newSpan = Math.max(6, Math.min(span * Math.pow(1 + CONFIG.wheelZoom, notches), maxSpan));
+  let from = anchor - frac * newSpan, to = from + newSpan;
+  // Con newSpan <= n + 2*gap, el primer recorte ya deja from >= -gap: los dos
+  // topes no pueden pelearse (si lo hacían, el hueco se iba entero a un lado).
+  if (to > n + gap) { to = n + gap; from = to - newSpan; }
+  if (from < -gap) { from = -gap; to = from + newSpan; }
+  ts.setVisibleLogicalRange({ from, to });
 }, { passive: false });
 const toCandle = ([t, o, h, l, c]) => ({ time: t, open: o, high: h, low: l, close: c });
 

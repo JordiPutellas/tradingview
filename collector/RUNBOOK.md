@@ -339,7 +339,14 @@ cfg.reset()                  // borra TODOS los ajustes locales y recarga
 ```
 
 El zoom de rueda es propio (LWC solo ofrece on/off y mueve un 10% de
-`barSpacing` por muesca): escala el rango lógico visible alrededor del cursor.
+`barSpacing` por muesca): escala el rango lógico visible alrededor del cursor,
+con topes propios — al fijar el rango a mano nos saltamos los límites de LWC y
+alejando sin freno el gráfico acababa empujado fuera de la pantalla. El tope
+de alejamiento es "todo lo cargado más 60 velas de margen a cada lado", y como
+el histórico crece solo al desplazarse al pasado, se puede seguir alejando.
+También se baja `minBarSpacing` a 0,05 (0,5 por defecto): con el valor de
+fábrica solo caben ~2.600 velas y, al pedir más, LWC recortaba el ancho de la
+ventana pero respetaba su posición.
 El autoajuste ignora los dibujos anulando el `autoscaleInfo` de cada primitive
 del plugin, que por defecto devuelve el rango de sus anclas. La posición de la
 barra de dibujo flotante se guarda en `localStorage['btcdash.toolbarPos']`.

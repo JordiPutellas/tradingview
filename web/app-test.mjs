@@ -253,6 +253,21 @@ await page.evaluate(() => localStorage.removeItem('cfg.wheelZoom'));
 await page.reload();
 await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
 
+// 11b. F2b — alejar hasta el tope no puede dejar la pantalla en blanco
+await page.mouse.move(700, 400);
+for (let i = 0; i < 40; i++) await page.mouse.wheel(0, 100);
+await page.waitForTimeout(2500);
+const zoomOut = await page.evaluate(`(${readPixels.toString()})()`);
+const zr = await page.evaluate(() => {
+  const r = window.__test.chart.timeScale().getVisibleLogicalRange();
+  const n = window.__test.getBars().length;
+  return { from: r.from, to: r.to, n, dentro: Math.min(r.to, n) - Math.max(r.from, 0) };
+});
+const vacio = (zr.to - zr.n) / (zr.to - zr.from);   // fracción de pantalla sin datos a la derecha
+check('el contrazoom máximo deja velas en pantalla',
+  zoomOut.up + zoomOut.down > 1000 && zr.dentro > (zr.to - zr.from) * 0.5 && vacio < 0.05,
+  `${zoomOut.up + zoomOut.down} px de vela · rango ${zr.from.toFixed(0)}..${zr.to.toFixed(0)} sobre ${zr.n} velas · ${(vacio * 100).toFixed(1)}% vacío a la derecha`);
+
 // 12. F2b — autoescala con el GESTO del usuario: dibujo lejos del precio
 // visible (dibujado a 77k, mirando 2019 a 10k) y doble click en la escala.
 // El de F2a llamaba a applyOptions({autoScale:true}) y medía coordenadas; este
