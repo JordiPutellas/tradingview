@@ -52,7 +52,8 @@ Dashboard de gráficos de Bitcoin auto-alojado, de uso personal, orientado al **
 | Frontend              | ~~Cloudflare Pages~~ → **VPS, servido por la API** (decisión F1c, ver fila "Hosting frontend") | Mismo origen y un solo deploy |
 | Retención 1s          | **Infinita** (decisión 2026-08-20)           | Comprimir sí, borrar no: ~2,7 GB/año con 27 GB libres, y el usuario revisa operaciones antiguas. Purga manual documentada en el RUNBOOK por si acaso |
 | Estrategia gráfico    | Directo a LWC, **sin prototipo comparativo** | Validado en spike F1c: 82k velas de 1s a 60 FPS de pan/zoom (suelo conservador en headless). Plan B descartado |
-| Plugin de dibujo      | **lightweight-charts-drawing** (MIT, v5)     | Validado en spike: drag, serialización JSON, 68 herramientas. `difurious/line-tools` está deprecado (v3.8). La zona de dos niveles se compone con 2 `HorizontalRay` enlazados — sin primitives custom |
+| Plugin de dibujo      | ~~lightweight-charts-drawing~~ → **primitives propias** (decisión F3, ver abajo) | El plugin no podía arreglarse desde fuera: su modelo de anclas es incompatible con lo que pedimos |
+| Motor de dibujos      | **Propio, sobre `ISeriesPrimitive` de LWC v5** (`web/src/draw/`) | 7 herramientas, no 68. Ver "Por qué se retiró el plugin" |
 | Hosting frontend      | **VPS, servido por la propia API** (no Cloudflare Pages) | Mismo origen (sin CORS), una sola app de Access cubre API+frontend, el WS va al mismo host por el túnel existente, y un único deploy |
 
 ### Plan B (documentado, no activado)
@@ -60,6 +61,52 @@ Dashboard de gráficos de Bitcoin auto-alojado, de uso personal, orientado al **
 Si LWC v5 + plugin de dibujo resulta inviable (drag/hit-testing inestable, rendimiento insuficiente con 86.400 velas), migrar a **KLineChart v10** (Apache 2.0), que trae dibujos e indicadores de fábrica. El backend es agnóstico del motor gráfico, así que la migración no toca el pipeline de datos.
 
 **Criterio de activación del plan B:** si tras 2 días de integración el plugin de dibujo no permite crear, arrastrar y persistir una línea horizontal y un rectángulo de forma estable, parar y reevaluar.
+
+### Por qué se retiró el plugin de dibujo (decisión F3)
+
+El usuario reportó que los dibujos "funcionan fatal": solo se ajustan en
+vertical, arrastrar en horizontal mueve el gráfico entero, no se pueden
+seleccionar para configurarlos y hay círculos permanentes que sobran. El
+diagnóstico sobre el código del plugin y el de LWC (ambos con fuentes
+disponibles) encontró que **ninguno de los cuatro síntomas es un bug
+puntual**: salen de decisiones de diseño que no se pueden corregir desde
+fuera.
+
+1. **El arrastre horizontal no puede funcionar.** El plugin registra
+   `mousedown/mousemove/mouseup` sobre el contenedor en **fase de burbuja** y
+   no llama a `preventDefault` ni a `stopPropagation` en ninguna parte del
+   bundle (0 ocurrencias), ni toca `handleScroll`. LWC recibe el mismo evento
+   y panea: en su handler, el desplazamiento del **tiempo es incondicional**
+   mientras el del **precio se descarta si el eje está en autoescala** (lo
+   está por defecto). Como el gráfico se traslada bajo el cursor exactamente
+   los mismos píxeles, **la vela bajo el ratón nunca cambia** y el
+   `coordinateToTime(x)` del plugin devuelve el mismo tiempo en cada
+   movimiento. De ahí el síntoma exacto: el dibujo solo se mueve en vertical
+   y el gráfico se va con el ratón.
+2. **El modelo de anclas no admite lo que necesitamos.** `coordinateToTime`
+   devuelve el tiempo de una **vela** (movimiento cuantizado, imposible
+   colocar algo entre dos velas) y `null` fuera de los datos; el guard es
+   todo-o-nada, así que si el tiempo es `null` **también se descarta el
+   precio**. En el camino de vuelta, `timeToCoordinate` devuelve `null` para
+   tiempos que no existen en la escala y cada renderer aborta: **un dibujo
+   anclado a la derecha de la última vela simplemente desaparece**.
+3. **Los círculos permanentes no son los puntos de control.** Los de control
+   sí están condicionados a la selección; lo que se ve siempre es decoración
+   incrustada en el renderer de `HorizontalRay` (un `arc()` relleno y una
+   flecha, sin opción para desactivarlos) — y nuestra zona de dos niveles son
+   dos `HorizontalRay`, o sea cuatro adornos por zona.
+4. **No existe arrastrar la figura.** El plugin solo arrastra **un ancla** y
+   únicamente si el `mousedown` cae a ≤8 px de ella: deforma, nunca traslada.
+   Agarrar una línea de tendencia por el medio solo puede panear el gráfico.
+
+Un motor propio sobre `ISeriesPrimitive` cuesta ~900 líneas para **7
+herramientas y la medición**, y resuelve los cuatro puntos de raíz: eventos en
+**fase de captura** (LWC no llega a enterarse del gesto), coordenadas por
+**índice lógico fraccionario** con extrapolación (se puede dibujar entre velas
+y a la derecha de la última), puntos de control **solo al seleccionar**, y
+arrastre de la figura entera. El bundle además adelgaza de 388 kB a 186 kB.
+Queda una dependencia menos que mantener; el precio es que el pintado y el
+hit-test de cada figura son nuestros.
 
 ---
 
@@ -151,6 +198,10 @@ Si LWC v5 + plugin de dibujo resulta inviable (drag/hit-testing inestable, rendi
 - **RF-5.10** (F2a) El autoajuste de la escala de precio mira **solo las velas**: los dibujos no lo estiran (se anula `autoscaleInfo` de cada primitive)
 - **RF-5.11** (F2a/F2b) Sensibilidad de la rueda y márgenes de la escala **configurables** (`CONFIG` en `web/src/app.js`, ajustable en caliente desde la consola con `cfg.set()` / `cfg.reset()`)
 - **RF-5.12** (F2b) El bundle se sirve con hash de contenido en el nombre (`app.<hash>.js`) y el HTML con `Cache-Control: no-cache`: un deploy se ve sin recargas forzadas ni ventanas de incógnito
+- **RF-5.13** (F3) **Arrastrar un dibujo lo mueve a él, en los dos ejes, y NUNCA al gráfico.** Click encima selecciona (halo + puntos de control), click fuera deselecciona, Supr borra. Sin puntos de control permanentes: solo con la figura seleccionada
+- **RF-5.14** (F3) Panel flotante junto a la figura seleccionada con color, grosor, transparencia, color y transparencia de relleno (donde aplique) y estilo de línea (sólida/discontinua); los cambios se ven en vivo y se persisten
+- **RF-5.15** (F3) Herramienta de medición estilo TradingView: Shift+click fija el origen, la medición sigue al cursor, un click la fija y otro la elimina. Muestra diferencia de precio, porcentaje, número de barras y duración (`10d 20h`), con rectángulo semitransparente, flechas y etiqueta
+- **RF-5.16** (F3) Las 7 herramientas: horizontal (con y sin extensión), tendencia, rectángulo/zona, curva, arco, punto, texto — más la zona de dos niveles (dos horizontales vinculadas que se mueven juntas; con Shift se ajusta una sola)
 
 ### RF-6 — Operación
 
@@ -287,6 +338,7 @@ CREATE TABLE drawings (
 | **F1f** | Infra: Hetzner, Cloudflare Tunnel/Access, backups, monitorización                             | 12-20         |
 | **F2a** | ✅ HECHO — Arreglo de las 6 CAggs sin histórico (trampa 13) + ajustes de frontend (paleta, barras, zoom, autoescala) | 4-6 |
 | **F2b** | ✅ HECHO — Bundle con hash (la caché tapaba F2a), sin volumen ni rejilla, crosshair fino, y tests que miran los píxeles pintados | 2-3 |
+| **F3**  | ✅ HECHO — Motor de dibujos propio sobre primitives de LWC (retirado el plugin), panel de configuración, medición, y suite de gestos reales | 10-16 |
 |         | **Total Fase 1**                                                                              | **135-232 h** |
 
 Fases posteriores (indicadores, volume profile, CVD, alertas, replay): 60-120 h según alcance.

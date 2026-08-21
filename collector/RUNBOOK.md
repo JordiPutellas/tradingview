@@ -351,6 +351,36 @@ El autoajuste ignora los dibujos anulando el `autoscaleInfo` de cada primitive
 del plugin, que por defecto devuelve el rango de sus anclas. La posición de la
 barra de dibujo flotante se guarda en `localStorage['btcdash.toolbarPos']`.
 
+**Dibujos (F3).** Motor propio en `web/src/draw/` sobre la API de primitives
+de LWC v5; el plugin `lightweight-charts-drawing` se retiró (el porqué, con
+evidencia, en el README). Piezas: `geom.js` (geometría y formateo), `shapes.js`
+(catálogo de figuras: pintado, hit-test y puntos de control), `engine.js`
+(primitive, eventos, arrastre, medición y persistencia) y `panel.js` (panel de
+configuración). Lo que hay que saber para operarlo:
+
+- Los eventos se capturan **en fase de captura** sobre `#chart` y, cuando el
+  gesto es nuestro, se corta la propagación: por eso arrastrar un dibujo ya no
+  mueve el gráfico. Si alguna vez vuelve a moverse, mirar ahí primero.
+- Las figuras se guardan en `(tiempo UTC, precio)` y se pintan pasando por el
+  **índice lógico fraccionario**, no por `timeToCoordinate`: así se pueden
+  colocar entre velas y a la derecha de la última.
+- Formato en la API: `{kind:'shape', v:1, type, points:[{t,p}], style, style2?, text?}`
+  en `PUT /api/drawings/{id}`. La tabla estaba vacía al hacer el cambio, así
+  que no hubo migración; `load()` ignora cualquier payload que no sea `shape`.
+- Medición: Shift+click (o el botón 📏) fija el origen, sigue al cursor, un
+  click la fija y otro la borra.
+
+Tests (los dos necesitan la API en 127.0.0.1:8090 sirviendo `web/dist`):
+
+```bash
+cd web && npm test          # app-test.mjs (gráfico) + draw-test.mjs (dibujos)
+```
+
+`draw-test.mjs` usa **gestos reales** (mousedown/mousemove/mouseup con
+coordenadas) y comprueba efectos: que la figura se mueve en los dos ejes, que
+el **rango visible del gráfico no cambia** durante el arrastre, y los píxeles
+pintados en el canvas tras cada cambio del panel.
+
 **Caché del bundle (F2b).** Un deploy no se veía hasta abrir una ventana de
 incógnito: el fichero nuevo estaba en el servidor —el `grep` lo confirmaba—
 pero el navegador seguía sirviendo su copia de `app.js`, la misma URL de
