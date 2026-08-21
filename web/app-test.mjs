@@ -140,79 +140,159 @@ check('zona restaurada con precios (no timestamps)',
   restored.zonePrices.every(([a, b]) => a > 1000 && a < 1e6 && b > 1000 && b < 1e6),
   JSON.stringify(restored.zonePrices));
 
-// 10. F2a — colores y márgenes
-const look = await page.evaluate(() => {
-  const { chart, series } = window.__test;
-  const so = series.options(), co = chart.options();
-  return {
-    up: so.upColor, down: so.downColor, borderUp: so.borderUpColor, borderDown: so.borderDownColor,
-    wickUp: so.wickUpColor, wickDown: so.wickDownColor,
-    bg: co.layout.background.color, margins: chart.priceScale('right').options().scaleMargins,
-  };
-});
-check('velas alcistas #7092be, bajistas #dadada', look.up === '#7092be' && look.down === '#dadada', JSON.stringify(look));
-check('borde y mecha del color del cuerpo',
-  look.borderUp === look.up && look.wickUp === look.up &&
-  look.borderDown === look.down && look.wickDown === look.down);
-check('fondo #363636', look.bg === '#363636', look.bg);
-check('margen superior del precio reducido', look.margins.top <= 0.08, JSON.stringify(look.margins));
-
-// 11. F2a — sensibilidad de la rueda (una muesca = CONFIG.wheelZoom)
-const zoomBefore = await page.evaluate(() => window.__test.chart.timeScale().getVisibleLogicalRange());
-await page.mouse.move(700, 400);
-await page.mouse.wheel(0, 100);
-await page.waitForTimeout(300);
-const zoomAfter = await page.evaluate(() => window.__test.chart.timeScale().getVisibleLogicalRange());
-const want = await page.evaluate(() => 1 + window.__test.CONFIG.wheelZoom);
-const ratio = (zoomAfter.to - zoomAfter.from) / (zoomBefore.to - zoomBefore.from);
-check('una muesca de rueda escala el rango visible', Math.abs(ratio - want) < 0.02,
-  `ratio=${ratio.toFixed(3)} esperado=${want}`);
-
-// 12. F2a — el autoajuste ignora los dibujos
-await page.evaluate(() => {
-  const { chart, getBars, TOOL_DEFS, addDrawing } = window.__test;
-  const bars = getBars();
-  window.__far = Math.max(...bars.map(b => b[2])) * 2;
-  addDrawing(TOOL_DEFS.hline.make('zz-autoscale-test', [{ time: bars.at(-1)[0], price: window.__far }]));
-  chart.priceScale('right').applyOptions({ autoScale: true });
-});
-await page.waitForTimeout(500);
-const visibleMax = () => {
-  const { chart, getBars } = window.__test;
-  const r = chart.timeScale().getVisibleLogicalRange();
-  const vis = getBars().slice(Math.max(0, Math.ceil(r.from)), Math.floor(r.to) + 1);
-  return Math.max(...vis.map(b => b[2]));
+// 10. F2b — colores REALES en el canvas, no las opciones de la serie.
+// El test de F2a comprobaba series.options(): eso solo dice qué pedimos, no
+// qué se pintó. Aquí se leen los píxeles del canvas del panel principal.
+const readPixels = () => {
+  const cs = [...document.querySelectorAll('#chart canvas')];
+  const area = Math.max(...cs.map(c => c.width * c.height));
+  const counts = new Map();
+  let total = 0, black = 0;
+  for (const c of cs) {
+    if (c.width * c.height < area * 0.9) continue;   // fuera escalas de precio/tiempo
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i + 3] === 0) continue;                  // capa de crosshair, transparente
+      const k = `${d[i]},${d[i + 1]},${d[i + 2]}`;
+      counts.set(k, (counts.get(k) || 0) + 1);
+      total++;
+      if (d[i] + d[i + 1] + d[i + 2] === 0) black++;
+    }
+  }
+  const top = [...counts].sort((a, b) => b[1] - a[1]).slice(0, 4);
+  const n = (k) => counts.get(k) || 0;
+  return { top, total, black,
+    up: n('112,146,190'), down: n('218,218,218'),
+    viejoUp: n('38,166,154'), viejoDown: n('239,83,80'), fondo: n('54,54,54') };
 };
-const auto = await page.evaluate((fn) => {
-  const { series, dm } = window.__test;
-  const r = { yFar: series.priceToCoordinate(window.__far),
-    yMax: series.priceToCoordinate(eval(`(${fn})`)()),
-    h: document.getElementById('chart').clientHeight };
-  dm.removeDrawing('zz-autoscale-test');
-  return r;
-}, visibleMax.toString());
-check('el autoajuste ignora los dibujos', auto.yFar === null || auto.yFar < 0, JSON.stringify(auto));
-check('el autoajuste sí encuadra las velas visibles', auto.yMax > 0 && auto.yMax < auto.h, JSON.stringify(auto));
+const px = await page.evaluate(`(${readPixels.toString()})()`);
+check('fondo #363636 pintado (color dominante del canvas)',
+  px.top[0][0] === '54,54,54' && px.fondo > px.total * 0.5,
+  `dominante ${px.top[0][0]} (${((px.fondo / px.total) * 100).toFixed(1)}% del canvas)`);
+check('velas alcistas #7092be pintadas', px.up > 1000, `${px.up} px`);
+check('velas bajistas #dadada pintadas', px.down > 1000, `${px.down} px`);
+check('sin verde/rojo por defecto en el canvas', px.viejoUp === 0 && px.viejoDown === 0,
+  `#26a69a=${px.viejoUp} #ef5350=${px.viejoDown}`);
+check('sin outline negro', px.black === 0, `${px.black} px negros`);
+const margins = await page.evaluate(() => window.__test.chart.priceScale('right').options().scaleMargins);
+check('margen superior del precio reducido', margins.top <= 0.08, JSON.stringify(margins));
+
+// 10c. F2b — sin rejilla: una franja vacía del panel es fondo puro
+const gridProbe = await page.evaluate(() => {
+  const cs = [...document.querySelectorAll('#chart canvas')];
+  const area = Math.max(...cs.map(c => c.width * c.height));
+  const pane = cs.find(c => c.width * c.height >= area * 0.9);
+  const d = pane.getContext('2d').getImageData(0, 8, pane.width, 1).data;
+  let distintos = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] !== 0 && !(d[i] === 54 && d[i + 1] === 54 && d[i + 2] === 54)) distintos++;
+  }
+  return { distintos, ancho: pane.width };
+});
+check('sin rejilla (franja superior toda de fondo)', gridProbe.distintos === 0,
+  `${gridProbe.distintos}/${gridProbe.ancho} px distintos del fondo`);
+check('sin rastro del gris de la rejilla anterior',
+  (px.top.find(([k]) => k === '66,66,66' || k === '67,67,67') || [null, 0])[1] === 0);
+
+// 10d. F2b — crosshair sólido, oscuro y de 1 px
+await page.mouse.move(700, 400);
+await page.waitForTimeout(400);
+const cross = await page.evaluate(() => {
+  const cs = [...document.querySelectorAll('#chart canvas')];
+  const area = Math.max(...cs.map(c => c.width * c.height));
+  let mejor = { run: 0, columnas: 0, total: 0, alto: 0 };
+  for (const c of cs) {
+    if (c.width * c.height < area * 0.9) continue;
+    const { width: w, height: h } = c;
+    const d = c.getContext('2d').getImageData(0, 0, w, h).data;
+    let columnas = 0, run = 0, total = 0;
+    for (let x = 0; x < w; x++) {
+      let seguidos = 0;
+      for (let y = 0; y < h; y++) {
+        const i = (y * w + x) * 4;
+        if (d[i] === 30 && d[i + 1] === 30 && d[i + 2] === 30 && d[i + 3] === 255) { seguidos++; total++; }
+      }
+      if (seguidos > h * 0.9) columnas++;
+      run = Math.max(run, seguidos);
+    }
+    if (total > mejor.total) mejor = { run, columnas, total, alto: h };
+  }
+  return mejor;
+});
+check('crosshair pintado en #1e1e1e', cross.total > 100, `${cross.total} px`);
+check('crosshair sólido (no discontinuo)', cross.run > cross.alto * 0.9,
+  `tramo continuo ${cross.run}/${cross.alto} px`);
+check('crosshair de 1 px de ancho', cross.columnas === 1, `${cross.columnas} columnas completas`);
+await page.mouse.move(20, 780); // fuera del gráfico: quita el crosshair
+
+// 10b. F2b — el volumen ya no está
+const seriesCount = await page.evaluate(() => window.__test.chart.panes()[0].getSeries().length);
+check('sin indicador de volumen', seriesCount === 1, `${seriesCount} serie(s) en el panel`);
+
+// 11. F2b — la rueda mueve lo que dice la config, y el ajuste se lee de verdad
+const wheelRatio = async () => {
+  const before = await page.evaluate(() => window.__test.chart.timeScale().getVisibleLogicalRange());
+  await page.mouse.move(700, 400);
+  await page.mouse.wheel(0, 100);
+  await page.waitForTimeout(250);
+  const after = await page.evaluate(() => window.__test.chart.timeScale().getVisibleLogicalRange());
+  return (after.to - after.from) / (before.to - before.from);
+};
+const r1 = await wheelRatio();
+const want1 = await page.evaluate(() => 1 + window.__test.CONFIG.wheelZoom);
+check('una muesca escala el rango visible según CONFIG', Math.abs(r1 - want1) < 0.02,
+  `ratio=${r1.toFixed(3)} esperado=${want1}`);
+// cambiar el ajuste debe cambiar el efecto (si LWC siguiera mandando, no lo haría)
+await page.evaluate(() => localStorage.setItem('cfg.wheelZoom', '0.6'));
+await page.reload();
+await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
+const r2 = await wheelRatio();
+check('cfg.wheelZoom se lee al arrancar y manda sobre LWC', Math.abs(r2 - 1.6) < 0.02,
+  `ratio=${r2.toFixed(3)} esperado=1.6`);
+await page.evaluate(() => localStorage.removeItem('cfg.wheelZoom'));
+await page.reload();
+await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
+
+// 12. F2b — autoescala con el GESTO del usuario: dibujo lejos del precio
+// visible (dibujado a 77k, mirando 2019 a 10k) y doble click en la escala.
+// El de F2a llamaba a applyOptions({autoScale:true}) y medía coordenadas; este
+// hace lo mismo que el usuario y mide el rango de precio que queda a la vista.
+async function autoscaleProbe() {
+  await page.click('button[data-tf="1D"]');
+  await page.waitForFunction(() => window.__test.getTF().name === '1D' && window.__test.getBars().length > 100, { timeout: 20000 });
+  const far = await page.evaluate(() => {
+    const { getBars, TOOL_DEFS, addDrawing } = window.__test;
+    const bars = getBars();
+    const price = bars.at(-1)[4];
+    addDrawing(TOOL_DEFS.hline.make('zz-autoscale-test', [{ time: bars.at(-1)[0], price }]));
+    // irse al principio del histórico: allí el precio es una fracción del actual
+    window.__test.chart.timeScale().setVisibleLogicalRange({ from: 0, to: 120 });
+    return price;
+  });
+  await page.waitForTimeout(600);
+  const box = await page.locator('#chart').boundingBox();
+  await page.mouse.dblclick(box.x + box.width - 35, box.y + box.height / 2); // escala de precio → AUTO
+  await page.waitForTimeout(600);
+  const view = await page.evaluate(() => {
+    const { series } = window.__test;
+    const h = document.getElementById('chart').clientHeight;
+    return { top: series.coordinateToPrice(0), bottom: series.coordinateToPrice(h) };
+  });
+  await page.evaluate(() => window.__test.dm.removeDrawing('zz-autoscale-test'));
+  return { far, ...view };
+}
+const as = await autoscaleProbe();
+check('el autoajuste ignora los dibujos (gesto real)', as.top < as.far * 0.5,
+  `dibujo en ${as.far.toFixed(0)}, vista tras AUTO ${as.bottom.toFixed(0)}–${as.top.toFixed(0)}`);
 
 // 12b. control: con drawingsAutoscale=1 el dibujo SÍ debe estirar la escala.
 // Sin esto, 12 pasaría igual aunque el arreglo no hiciera nada.
 await page.evaluate(() => localStorage.setItem('cfg.drawingsAutoscale', '1'));
 await page.reload();
 await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
-const ctrl = await page.evaluate(() => {
-  const { chart, series, getBars, TOOL_DEFS, addDrawing, dm } = window.__test;
-  const bars = getBars();
-  const far = Math.max(...bars.map(b => b[2])) * 2;
-  addDrawing(TOOL_DEFS.hline.make('zz-autoscale-ctrl', [{ time: bars.at(-1)[0], price: far }]));
-  chart.priceScale('right').applyOptions({ autoScale: true });
-  return new Promise(res => setTimeout(() => {
-    const y = series.priceToCoordinate(far);
-    dm.removeDrawing('zz-autoscale-ctrl');
-    res({ y, h: document.getElementById('chart').clientHeight });
-  }, 500));
-});
-check('control: con la opción activada el dibujo sí estira la escala',
-  ctrl.y !== null && ctrl.y > 0 && ctrl.y < ctrl.h, JSON.stringify(ctrl));
+const ctrl = await autoscaleProbe();
+check('control: con la opción activada el dibujo sí estira la escala', ctrl.top >= ctrl.far,
+  `dibujo en ${ctrl.far.toFixed(0)}, vista tras AUTO ${ctrl.bottom.toFixed(0)}–${ctrl.top.toFixed(0)}`);
 await page.evaluate(() => localStorage.removeItem('cfg.drawingsAutoscale'));
 await page.reload();
 await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
