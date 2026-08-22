@@ -1,6 +1,18 @@
 // Test funcional headless del frontend F1c contra la API real.
 // Uso: node app-test.mjs  (API en 127.0.0.1:8090 sirviendo web/dist)
 import { chromium } from 'playwright';
+import { existsSync } from 'node:fs';
+
+// Chromium de Playwright necesita libnss3/libnspr4 y en esta máquina no están
+// en el sistema (no hay sudo para instalarlas). Si están extraídas en la caché
+// del usuario, se le añaden al entorno para que el navegador arranque:
+//   mkdir -p ~/.cache/playwright-sys-libs && cd $_ \
+//     && apt-get download libnss3 libnspr4 && for d in *.deb; do dpkg-deb -x $d .; done
+const LIBS = `${process.env.HOME}/.cache/playwright-sys-libs/usr/lib/x86_64-linux-gnu`;
+if (existsSync(LIBS)) {
+  process.env.LD_LIBRARY_PATH = [LIBS, process.env.LD_LIBRARY_PATH].filter(Boolean).join(':');
+}
+
 
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1400, height: 800 } });
@@ -392,27 +404,30 @@ check('timeframes en una sola línea con ventana estrecha',
 check('la rueda desplaza la barra de timeframes', tfbar.desborda && tfbar.scrollDelta > 0, JSON.stringify(tfbar));
 await page.setViewportSize({ width: 1400, height: 800 });
 
-// 14. F2a — barra de dibujo flotante: se arrastra y la posición persiste
-const grip = await page.locator('#toolsGrip').boundingBox();
-await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
-await page.mouse.down();
-await page.mouse.move(grip.x + 320, grip.y + 240, { steps: 10 });
-await page.mouse.up();
-await page.waitForTimeout(200);
-const moved = await page.evaluate(() => ({
-  left: window.__test.toolsEl.style.left, top: window.__test.toolsEl.style.top,
-  saved: localStorage.getItem('btcdash.toolbarPos'),
-}));
-check('barra de dibujo arrastrable', parseFloat(moved.left) > 250 && parseFloat(moved.top) > 200, JSON.stringify(moved));
-await page.reload();
-await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
-const kept = await page.evaluate(() => ({
-  left: window.__test.toolsEl.style.left, top: window.__test.toolsEl.style.top,
-}));
-check('posición de la barra persiste entre sesiones',
-  kept.left === moved.left && kept.top === moved.top, `${JSON.stringify(moved)} → ${JSON.stringify(kept)}`);
-await page.evaluate(() => localStorage.removeItem('btcdash.toolbarPos'));
-
+// 14. F4b — la barra de dibujo es una columna fija en el lateral izquierdo
+// (antes flotaba y se arrastraba: con catorce botones tapaba el gráfico).
+const barra = await page.evaluate(() => {
+  const el = window.__test.toolsEl;
+  const bs = [...el.querySelectorAll('button')];
+  const r = el.getBoundingClientRect();
+  const canvas = [...document.querySelectorAll('#chart canvas')]
+    .reduce((a, b) => (a.width * a.height >= b.width * b.height ? a : b));
+  return {
+    left: r.left, ancho: r.width, alto: r.height,
+    columna: bs.every(b => Math.abs(b.getBoundingClientRect().left - bs[0].getBoundingClientRect().left) < 2),
+    apilados: bs[bs.length - 1].getBoundingClientRect().top > bs[0].getBoundingClientRect().top + 100,
+    graficoEmpiezaDespues: canvas.getBoundingClientRect().left >= r.right - 1,
+    botones: bs.length,
+    hayPunto: !!el.querySelector('button[data-tool="point"]'),
+  };
+});
+check('la barra de dibujo está pegada al lateral izquierdo',
+  barra.left === 0 && barra.ancho < 60, JSON.stringify(barra));
+check('y es una columna: los botones van uno debajo de otro',
+  barra.columna && barra.apilados, `${barra.botones} botones`);
+check('el gráfico empieza donde acaba la barra (no la tapa)',
+  barra.graficoEmpiezaDespues, JSON.stringify(barra));
+check('la herramienta "punto" ya no está', !barra.hayPunto);
 
 // ============================================================ F4 · navegación
 // Regla de F2a/F3: efecto, no intención. Aquí el rango visible se lee con

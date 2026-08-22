@@ -639,45 +639,12 @@ tfsEl.addEventListener('click', (e) => {
 
 sincronizarBotones();   // el imán guardado tiene que verse encendido al entrar
 
-// ---------- barra de dibujo flotante ----------
-// Arrastrable por el asa y con la posición guardada entre sesiones.
-const toolsEl = $('#tools'), gripEl = $('#toolsGrip');
-const TOOLBAR_KEY = 'btcdash.toolbarPos';
-function placeToolbar(x, y) {
-  const r = toolsEl.getBoundingClientRect();
-  const pos = {
-    x: Math.max(0, Math.min(x, innerWidth - r.width)),
-    y: Math.max(0, Math.min(y, innerHeight - r.height)),
-  };
-  toolsEl.style.left = `${pos.x}px`;
-  toolsEl.style.top = `${pos.y}px`;
-  return pos;
-}
-try {
-  const saved = JSON.parse(localStorage.getItem(TOOLBAR_KEY) || 'null');
-  if (saved) placeToolbar(saved.x, saved.y);
-} catch { /* posición corrupta: se queda la de por defecto */ }
-
-gripEl.addEventListener('pointerdown', (e) => {
-  if (e.button !== 0) return;
-  e.preventDefault();
-  const r = toolsEl.getBoundingClientRect();
-  const dx = e.clientX - r.left, dy = e.clientY - r.top;
-  toolsEl.classList.add('dragging');
-  const move = (ev) => placeToolbar(ev.clientX - dx, ev.clientY - dy);
-  const up = (ev) => {
-    removeEventListener('pointermove', move);
-    removeEventListener('pointerup', up);
-    toolsEl.classList.remove('dragging');
-    localStorage.setItem(TOOLBAR_KEY, JSON.stringify(placeToolbar(ev.clientX - dx, ev.clientY - dy)));
-  };
-  addEventListener('pointermove', move);
-  addEventListener('pointerup', up);
-});
-addEventListener('resize', () => {
-  const r = toolsEl.getBoundingClientRect();
-  placeToolbar(r.left, r.top); // que no se quede fuera al encoger la ventana
-});
+// La barra de dibujo es ahora una columna fija en el lateral izquierdo
+// (F4b): ocupa sitio en el layout en vez de flotar, así que no tapa el precio
+// y no hace falta arrastrarla ni recordar dónde estaba. Sustituye a la barra
+// flotante de F2a (RF-5.9).
+const toolsEl = $('#tools');
+localStorage.removeItem('btcdash.toolbarPos');   // resto de la barra flotante
 
 // ---------- arranque ----------
 (async () => {

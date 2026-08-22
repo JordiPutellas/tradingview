@@ -25,23 +25,27 @@
   .tfs button:hover, .tools button:hover { background:#404040; }
   .tfs button.active { color:var(--accent); border-color:var(--border); background:#404040; }
   #status { font-size:11px; color:var(--muted); flex:none; margin-left:4px; }
+  /* Barra de dibujo a la izquierda y gráfico a su derecha: la barra ocupa
+     sitio en vez de flotar, así que nunca tapa el precio. */
+  #main { flex:1; min-height:0; display:flex; }
   /* El gráfico va dentro de un contenedor posicionado para poder colgarle
      encima la legend sin meter hijos en el div que gestiona LWC. */
-  #chartWrap { position:relative; flex:1; min-height:0; }
+  #chartWrap { position:relative; flex:1; min-width:0; }
   #chart { position:absolute; inset:0; }
-  #legend { position:absolute; left:10px; top:6px; z-index:20; pointer-events:none;
+  #legend { position:absolute; left:8px; top:6px; z-index:20; pointer-events:none;
             font:12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--muted);
             text-shadow:0 1px 2px rgba(0,0,0,.55); white-space:nowrap; }
   #legend b { font-weight:600; color:var(--fg); }
-  /* Barra de dibujo flotante y arrastrable (posición persistida). Puede
-     superponerse a la cabecera: z-index por encima. */
-  .tools { position:fixed; left:8px; top:70px; z-index:30; display:flex; align-items:center; gap:2px;
-           background:var(--panel); border:1px solid var(--border); border-radius:6px; padding:3px 4px;
-           box-shadow:0 6px 18px rgba(0,0,0,.45); }
+  /* Barra de dibujo: columna fija en el lateral izquierdo (F4b). Antes
+     flotaba y se arrastraba, pero con catorce botones tapaba el gráfico. */
+  .tools { flex:none; display:flex; flex-direction:column; align-items:center; gap:2px;
+           background:var(--panel); border-right:1px solid var(--border); padding:5px 4px;
+           overflow-y:auto; overflow-x:hidden; scrollbar-width:none; }
+  .tools::-webkit-scrollbar { display:none; }
+  .tools button { width:28px; height:28px; padding:0; display:flex; align-items:center;
+                  justify-content:center; font-size:14px; line-height:1; }
   .tools button.active { color:var(--accent); background:#404040; border-color:var(--border); }
-  .grip { cursor:grab; color:var(--muted); padding:0 5px; user-select:none; touch-action:none;
-          letter-spacing:-2px; }
-  .tools.dragging .grip { cursor:grabbing; }
+  .tools .sep { width:18px; height:1px; background:var(--border); margin:4px 0; flex:none; }
   /* Panel de configuración del dibujo seleccionado (F3) */
   #drawPanel { position:fixed; z-index:40; background:var(--panel); border:1px solid var(--border);
                border-radius:6px; padding:6px 8px; box-shadow:0 6px 18px rgba(0,0,0,.5);
@@ -70,27 +74,29 @@
   <div class="tfs" id="tfs"></div>
   <span id="status">conectando…</span>
 </header>
-<div id="chartWrap">
-  <div id="chart"></div>
-  <div id="legend"></div>
-</div>
-<div class="tools" id="tools">
-  <span class="grip" id="toolsGrip" title="Arrastra para mover la barra">⣿</span>
-  <button data-tool="hline" title="Línea horizontal (extendida)">─</button>
-  <button data-tool="hray" title="Línea horizontal (desde el punto)">╶─</button>
-  <button data-tool="trend" title="Línea de tendencia">╱</button>
-  <button data-tool="rect" title="Rectángulo / zona">▭</button>
-  <button data-tool="curve" title="Curva">◠</button>
-  <button data-tool="arc" title="Arco">◡</button>
-  <button data-tool="point" title="Punto">●</button>
-  <button data-tool="text" title="Texto">T</button>
-  <button data-tool="zone2" title="Zona de dos niveles">≡</button>
-  <button data-tool="__magnet" title="Imán: engancha a máximos, mínimos, apertura y cierre (M)">🧲</button>
-  <button data-tool="__hide" title="Ocultar todos los dibujos (H)">👁</button>
-  <button data-tool="__lock" title="Bloquear los dibujos para no moverlos sin querer (L)">🔒</button>
-  <button data-tool="__cross" title="Quitar el crosshair (X)">✛</button>
-  <button data-tool="__measure" title="Medir (o Shift + click en el gráfico)">📏</button>
-  <button data-tool="__clear" title="Borrar selección (Supr)">🗑</button>
+<div id="main">
+  <div class="tools" id="tools">
+    <button data-tool="hline" title="Línea horizontal (extendida)">─</button>
+    <button data-tool="hray" title="Línea horizontal (desde el punto)">╶─</button>
+    <button data-tool="trend" title="Línea de tendencia">╱</button>
+    <button data-tool="rect" title="Rectángulo / zona">▭</button>
+    <button data-tool="zone2" title="Zona de dos niveles">≡</button>
+    <button data-tool="curve" title="Curva">◠</button>
+    <button data-tool="arc" title="Arco">◡</button>
+    <button data-tool="text" title="Texto">T</button>
+    <div class="sep"></div>
+    <button data-tool="__magnet" title="Imán: engancha a máximos, mínimos, apertura y cierre (M)">🧲</button>
+    <button data-tool="__hide" title="Ocultar todos los dibujos (H)">👁</button>
+    <button data-tool="__lock" title="Bloquear los dibujos para no moverlos sin querer (L)">🔒</button>
+    <button data-tool="__cross" title="Quitar el crosshair (X)">✛</button>
+    <div class="sep"></div>
+    <button data-tool="__measure" title="Medir (o Shift + click en el gráfico)">📏</button>
+    <button data-tool="__clear" title="Borrar selección (Supr)">🗑</button>
+  </div>
+  <div id="chartWrap">
+    <div id="chart"></div>
+    <div id="legend"></div>
+  </div>
 </div>
 <div id="drawPanel" hidden>
   <div class="row">
