@@ -107,6 +107,20 @@ func (s *Server) handleCandles(w http.ResponseWriter, r *http.Request) {
 		order = "DESC"
 		from = to - limit*tf.Seconds*3
 	}
+	// Suelo obligatorio: 5.000 velas de 12M por 3 son 47.000 años hacia atrás,
+	// y to_timestamp() de eso hace estallar la query con "timestamp out of
+	// range" (500). Se ve al desplazarse al inicio del histórico en los
+	// timeframes grandes, que es justo cuando el frontend pide más pasado.
+	if from < 0 {
+		from = 0
+	}
+	if max := now + 10*365*24*3600; to > max {
+		to = max
+	}
+	if to <= from {
+		writeJSON(w, [][6]float64{})
+		return
+	}
 
 	t0 := time.Now()
 	rows, err := s.Pool.Query(r.Context(), fmt.Sprintf(tf.query, order), s.Symbol, from, to, limit)

@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,6 +72,39 @@ func TestTimeframeCoverage(t *testing.T) {
 		}
 		if last.Before(now.Add(-stale)) {
 			t.Errorf("%s: última vela %s, más de 3 buckets atrás", c.TF, last.Format(time.RFC3339))
+		}
+	}
+}
+
+// TestDeepHistoryRequest cubre el 500 que aparecía al pedir más pasado en los
+// timeframes grandes: sin `from`, el handler calculaba `to - limit*bucket*3`,
+// que para 12M x 5000 velas cae en el año -47.000 y PostgreSQL rechaza el
+// to_timestamp(). Lo veía el usuario al desplazarse al inicio del histórico.
+func TestDeepHistoryRequest(t *testing.T) {
+	url := os.Getenv("DATABASE_URL")
+	if url == "" {
+		t.Skip("sin DATABASE_URL: test contra la BD real")
+	}
+	symbol := os.Getenv("SYMBOL")
+	if symbol == "" {
+		symbol = "BTCUSDT"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, url)
+	if err != nil {
+		t.Fatalf("conexión: %v", err)
+	}
+	defer pool.Close()
+	srv := New(pool, symbol, ".")
+	h := srv.Handler()
+	// El principio del histórico: 2019-01-01, anterior a cualquier vela.
+	for _, tf := range []string{"12M", "6M", "3M", "1M", "1W", "1D", "1h", "1m", "1s"} {
+		req := httptest.NewRequest("GET", "/api/candles?tf="+tf+"&to=1546300800&limit=5000", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req.WithContext(ctx))
+		if rec.Code != 200 {
+			t.Errorf("%s: HTTP %d — %s", tf, rec.Code, strings.TrimSpace(rec.Body.String()))
 		}
 	}
 }
