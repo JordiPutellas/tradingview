@@ -40,6 +40,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/drawings", s.handleListDrawings)
 	mux.HandleFunc("PUT /api/drawings/{id}", s.handlePutDrawing)
 	mux.HandleFunc("DELETE /api/drawings/{id}", s.handleDeleteDrawing)
+	mux.HandleFunc("GET /api/alerts", s.handleListAlerts)
+	mux.HandleFunc("PUT /api/alerts/{id}", s.handlePutAlert)
+	mux.HandleFunc("DELETE /api/alerts/{id}", s.handleDeleteAlert)
+	mux.HandleFunc("GET /api/alerts/events", s.handleAlertEvents)
+	mux.HandleFunc("GET /api/alerts/status", s.handleAlertStatus)
+	mux.HandleFunc("POST /api/alerts/test", s.handleAlertTest)
 	mux.Handle("GET /", cacheHeaders(http.FileServer(http.Dir(s.StaticDir))))
 	return mux
 }
@@ -276,6 +282,20 @@ func (s *Server) handlePutDrawing(w http.ResponseWriter, r *http.Request) {
 		slog.Error("put drawing", "err", err)
 		http.Error(w, "store failed", http.StatusInternalServerError)
 		return
+	}
+	// Si el dibujo lleva alertas colgadas, el nivel se va con él: una línea
+	// horizontal ES el nivel, y moverla y que la alerta se quede donde estaba
+	// sería una trampa. side=NULL para que el motor vuelva a sembrar el lado y
+	// no dispare por el simple hecho de haberla movido.
+	if _, err := s.Pool.Exec(r.Context(), `
+		UPDATE alerts a SET
+		  level = round((d.payload->'points'->a.drawing_point->>'p')::numeric * 100000000),
+		  side = NULL, updated_at = now()
+		FROM drawings d
+		WHERE a.drawing_id = d.id AND d.id = $1 AND a.symbol = $2
+		  AND (d.payload->'points'->a.drawing_point->>'p') IS NOT NULL`,
+		id, s.Symbol); err != nil {
+		slog.Warn("arrastrar nivel de alerta", "err", err)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

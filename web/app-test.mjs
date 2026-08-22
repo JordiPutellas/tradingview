@@ -695,6 +695,86 @@ check('y a la misma posición', mismoRango(vAntesRecarga, vTrasRecarga, '30m', '
   `${iso(vAntesRecarga.from)}…${iso(vAntesRecarga.to)} → ${iso(vTrasRecarga.from)}…${iso(vTrasRecarga.to)}`);
 await page.evaluate(() => localStorage.removeItem(window.__test.VIEW_KEY));
 
+// ============================================================ F5 · alertas
+// El motor vive en el servidor y se prueba aparte (Go, contra la BD de test).
+// Aquí se comprueba la interfaz: crear con el botón derecho, ver la línea
+// pintada, listarla y borrarla.
+// Cuenta píxeles ámbar (el color de las alertas) en el lienzo del gráfico.
+const pixelesAmbarEn = () => page.evaluate(() => {
+  const cs = [...document.querySelectorAll('#chart canvas')];
+  const area = Math.max(...cs.map(c => c.width * c.height));
+  let n = 0;
+  for (const c of cs) {
+    if (c.width * c.height < area * 0.9) continue;
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i] > 180 && d[i + 1] > 110 && d[i + 1] < 200 && d[i + 2] < 100) n++;
+    }
+  }
+  return n;
+});
+
+await irTF('1m');
+await page.keyboard.press('End');
+await page.waitForTimeout(1500);
+await page.evaluate(async () => {
+  for (const a of await (await fetch('/api/alerts')).json()) {
+    await fetch(`/api/alerts/${a.id}`, { method: 'DELETE' });
+  }
+  await window.__test.alertas.recargar();
+});
+await page.waitForTimeout(400);
+// precio bajo el cursor según LWC, para comparar con lo que se guarda
+const puntoAlerta = { x: 700, y: 380 };
+const precioEsperado = await page.evaluate((p) => {
+  const r = window.__test.engine.paneRect();
+  return window.__test.series.coordinateToPrice(p.y - r.top);
+}, puntoAlerta);
+
+await page.mouse.click(puntoAlerta.x, puntoAlerta.y, { button: 'right' });
+await page.waitForTimeout(400);
+const menuVisible = await page.evaluate(() => {
+  const m = document.getElementById('alertMenu');
+  return m && !m.hidden ? m.textContent : null;
+});
+check('el botón derecho abre el menú de alerta con el precio de ese punto',
+  !!menuVisible && menuVisible.includes('Alerta en'), menuVisible);
+
+await page.evaluate(() => [...document.querySelectorAll('#alertMenu button')]
+  .find(b => b.textContent.includes('cualquier')).click());
+await page.waitForTimeout(900);
+const creadas = await page.evaluate(() => fetch('/api/alerts').then(r => r.json()));
+check('crear la alerta la guarda en el servidor con el nivel del punto',
+  creadas.length === 1 && Math.abs(creadas[0].level - precioEsperado) < precioEsperado * 0.002,
+  `nivel ${creadas[0]?.level?.toFixed(2)} vs precio ${precioEsperado.toFixed(2)}`);
+check('y con los valores por defecto (cualquier cruce, una vez, armada)',
+  creadas[0].direction === 'any' && creadas[0].mode === 'once' && creadas[0].status === 'armed',
+  JSON.stringify({ d: creadas[0]?.direction, m: creadas[0]?.mode, s: creadas[0]?.status }));
+
+await page.mouse.move(20, 780);
+await page.waitForTimeout(600);
+const pixelesAmbar = await pixelesAmbarEn();
+check('la alerta se ve en el gráfico como una línea', pixelesAmbar > 200, `${pixelesAmbar} px ámbar`);
+
+// el panel la lista y la borra
+await page.click('button[data-tool="__alerts"]');
+await page.waitForTimeout(600);
+const enPanel = await page.evaluate(() => {
+  const p = document.getElementById('alertPanel');
+  return { visible: !p.hidden, filas: p.querySelectorAll('.alerta').length,
+    texto: p.querySelector('.alerta b')?.textContent };
+});
+check('el panel lista la alerta', enPanel.visible && enPanel.filas === 1, JSON.stringify(enPanel));
+
+await page.evaluate(() => document.querySelector('#alertPanel .alerta button:last-child').click());
+await page.waitForTimeout(900);
+const trasBorrar = await page.evaluate(() => fetch('/api/alerts').then(r => r.json()));
+const pixelesTrasBorrar = await pixelesAmbarEn();
+check('borrarla la quita del servidor y del gráfico',
+  trasBorrar.length === 0 && pixelesTrasBorrar < pixelesAmbar / 4,
+  `${trasBorrar.length} alertas · ${pixelesAmbar} → ${pixelesTrasBorrar} px`);
+await page.evaluate(() => { document.getElementById('alertPanel').hidden = true; });
+
 await browser.close();
 console.log(fails.length ? `\nFALLOS: ${fails.join(', ')}` : '\nTODO OK');
 process.exit(fails.length ? 1 : 0);

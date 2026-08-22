@@ -66,6 +66,15 @@ done
 echo "· compilando el frontend"
 (cd web && npm run build >/dev/null)
 
+# Un `go run` de una ejecución anterior que se quedara vivo se queda con el
+# puerto, y las suites correrían contra un binario VIEJO sin enterarse: pasó, y
+# el síntoma fue un 404 en una ruta recién añadida.
+if (echo > /dev/tcp/127.0.0.1/$API_PUERTO) 2>/dev/null; then
+  echo "· puerto $API_PUERTO ocupado por una API anterior: la mato"
+  pkill -f 'exe/api' 2>/dev/null || true
+  sleep 2
+fi
+
 echo "· API local en 127.0.0.1:$API_PUERTO contra btc_test"
 (cd collector && DATABASE_URL="$DB_URL" STATIC_DIR=../web/dist API_ADDR="127.0.0.1:$API_PUERTO" \
   go run ./cmd/api > /tmp/api-test.log 2>&1) & api_pid=$!

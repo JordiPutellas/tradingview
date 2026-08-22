@@ -66,6 +66,34 @@
   #drawPanel button:hover { background:#404040; }
   #drawPanel button.active { color:var(--accent); border-color:var(--border); background:#404040; }
   #drawPanel select[data-k="tpl"] { flex:1; min-width:0; }
+  /* Alertas de precio (F5) */
+  #alertMenu { position:fixed; z-index:60; background:var(--panel); border:1px solid var(--border);
+               border-radius:6px; padding:4px; box-shadow:0 6px 18px rgba(0,0,0,.5);
+               display:flex; flex-direction:column; min-width:170px; }
+  #alertMenu[hidden] { display:none; }
+  #alertMenu .cab { color:var(--muted); font-size:11px; padding:3px 6px 5px; }
+  #alertMenu button { background:transparent; color:var(--fg); border:none; text-align:left;
+                      padding:5px 8px; border-radius:4px; cursor:pointer; font:inherit; }
+  #alertMenu button:hover { background:#404040; }
+  #alertPanel { position:fixed; right:12px; top:52px; z-index:50; width:520px; max-width:calc(100vw - 24px);
+                background:var(--panel); border:1px solid var(--border); border-radius:6px;
+                box-shadow:0 6px 18px rgba(0,0,0,.5); padding:8px; font-size:12px; }
+  #alertPanel[hidden] { display:none; }
+  #alertPanel header { display:flex; align-items:center; gap:8px; padding:0 0 6px; background:none;
+                       border:none; }
+  #alertPanel .titulo { font-weight:600; flex:1; }
+  #alertPanel .alerta { display:flex; align-items:center; gap:6px; padding:3px 0;
+                        border-top:1px solid #3a3a3a; }
+  #alertPanel .alerta.apagada { opacity:.55; }
+  #alertPanel .alerta b { min-width:78px; }
+  #alertPanel .alerta .est { color:var(--muted); min-width:62px; font-size:11px; }
+  #alertPanel .alerta input[type=text] { flex:1; min-width:60px; background:#3a3a3a; color:var(--fg);
+                        border:1px solid var(--border); border-radius:4px; padding:2px 5px; font:inherit; }
+  #alertPanel select, #alertPanel button { background:#3a3a3a; color:var(--fg);
+                        border:1px solid var(--border); border-radius:4px; padding:2px 5px;
+                        font:inherit; cursor:pointer; }
+  #alertPanel .vacio { color:var(--muted); padding:8px 2px; }
+  #alertPanel .estado { color:var(--muted); font-size:11px; padding-top:6px; }
 </style>
 </head>
 <body>
@@ -90,7 +118,8 @@
     <button data-tool="__lock" title="Bloquear los dibujos para no moverlos sin querer (L)">🔒</button>
     <button data-tool="__cross" title="Quitar el crosshair (X)">✛</button>
     <div class="sep"></div>
-    <button data-tool="__measure" title="Medir (o Shift + click en el gráfico)">📏</button>
+    <button data-tool="__alerts" title="Alertas de precio (click derecho en el gráfico para crear)">🔔</button>
+  <button data-tool="__measure" title="Medir (o Shift + click en el gráfico)">📏</button>
     <button data-tool="__clear" title="Borrar selección (Supr)">🗑</button>
   </div>
   <div id="chartWrap">
@@ -128,6 +157,15 @@
     <input type="text" data-k="tplName" placeholder="Nombre de la plantilla" maxlength="40">
     <button data-act="tpl-ok">Guardar</button>
   </div>
+</div>
+<div id="alertPanel" hidden>
+  <header>
+    <span class="titulo">Alertas de precio</span>
+    <button data-act="probar" title="Encola un mensaje de prueba; lo manda el motor">probar Telegram</button>
+    <button data-act="cerrar" title="Cerrar">✕</button>
+  </header>
+  <div data-k="lista"></div>
+  <div class="estado" data-k="estado"></div>
 </div>
 <script src="app.js"></script>
 </body>

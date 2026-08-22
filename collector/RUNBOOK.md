@@ -504,6 +504,173 @@ navegador basta mirar el `src` del `<script>` en el HTML servido:
 curl -s http://127.0.0.1:8080/ | grep -o 'src="[^"]*"'
 ```
 
+## 6e. Operaciones F5: tests aislados, backups y alertas
+
+### Entorno de test (bloque 1)
+
+Las suites de frontend corrían contra la base de datos de PRODUCCIÓN y en F4
+se llevaron por delante los dibujos del usuario. Ahora hay una instancia
+aparte, apagada salvo cuando se usa:
+
+```bash
+./run-tests.sh              # levanta todo, corre las dos suites y lo apaga
+./run-tests.sh draw         # solo la de dibujos
+SKIP_SEED=1 ./run-tests.sh  # sin resembrar (más rápido, si la semilla es fresca)
+```
+
+Lo que hace: arranca `timescaledb-test` (perfil `test`, puerto 5434, volumen
+propio, 256 MB), siembra datos sintéticos, arranca el feeder que emite una
+vela de 1s por segundo, abre el túnel 15434, compila el frontend, levanta la
+API local contra `btc_test` y corre las suites.
+
+**Tres barreras para que un test no pueda tocar producción:**
+
+1. `seed-test` aborta si el nombre de la base de datos no acaba en `_test`, y
+   falla cerrado: si la URL no es `postgres://` y no se sabe a qué apunta,
+   tampoco pasa.
+2. La API publica el nombre de la base de datos en `/api/health` y las suites
+   se niegan a arrancar si no acaba en `_test`.
+3. La URL de test vive dentro del servicio del compose, no en la línea de
+   órdenes.
+
+La semilla es reproducible (paseo aleatorio con semilla fija): 400 días de 1m
+y 6 h de 1s, de ~20k a ~80k para que la escala de precio tenga recorrido. Las
+suites no usan fechas absolutas: calculan sus ventanas sobre la de la semilla.
+
+```bash
+# a mano, en el servidor
+docker compose --profile test up -d timescaledb-test
+docker compose --profile test run --rm -T seed-test -days 400 -hours-1s 6
+docker compose --profile test up -d feeder-test
+docker compose --profile test stop timescaledb-test feeder-test   # al terminar
+```
+
+⚠️ La salida de `docker compose run` NO puede ir a `/dev/null`: mata el
+contenedor a los tres segundos (trampa 18 del README).
+
+### Backups (bloque 2, RF-6.4)
+
+Tres capas, y lo que NO se copia está decidido por escrito:
+
+| capa | qué | cuándo | tamaño |
+| --- | --- | --- | --- |
+| `estado` | dibujos, alertas, huecos, progreso de jobs, migraciones | cada 6 h | ~15 KB |
+| `1s` | un día UTC de `candles_1s`, el de **anteayer** | diaria, 11:20 | ~2 MB |
+| `1m` | `candles_1m` entera | domingos, 03:40 | ~92 MB |
+
+- **No se copian las CAggs**: son derivadas y `refresh-caggs` las rehace en
+  minutos. Copiar 600 MB para ahorrar cinco minutos no tiene sentido.
+- **No se copia el grueso de `candles_1s`** (2,2 GB): es re-descargable con
+  `backfill`. Sí se archiva día a día hacia adelante, y se coge el de anteayer
+  porque a esas alturas el cron de `t1` (09:40) ya lo ha corregido a
+  `quality='exact_t1'`: el archivo nace exacto y no hay que rehacerlo.
+- **`candles_1m` sí**, aunque sea reproducible: recuperarla de Binance son
+  horas y obliga a parar el colector. Es un seguro contra TIEMPO, no contra
+  pérdida.
+
+Formato CSV comprimido, no `pg_dump`: la imagen no lleva cliente de postgres y
+un dump de una hypertable no lleva los datos (trampa 17). El esquema se recrea
+con `collector migrate`, que está en git.
+
+```bash
+# manual
+docker compose --profile ops run --rm -T backup -capas estado,1m,1s
+ls -R backups/            # local, excluido del rsync de deploy.sh
+```
+
+**Qué tiene que crear el usuario** para que la copia salga del servidor
+(hasta entonces el comando avisa en cada ejecución: la copia se queda en el
+mismo disco que la base de datos):
+
+1. Cuenta en Cloudflare R2 (10 GB gratis, salida sin coste — importa porque el
+   simulacro de restauración descarga). Alternativa: Backblaze B2.
+2. Crear un bucket, p. ej. `btcdash-backups`.
+3. Crear un token de API con permiso de lectura y escritura SOBRE ESE BUCKET.
+4. Añadir a `~/btcdash/collector/.env` (RUNBOOK §0):
+
+```
+BACKUP_S3_ENDPOINT=<id-de-cuenta>.r2.cloudflarestorage.com
+BACKUP_S3_BUCKET=btcdash-backups
+BACKUP_S3_ACCESS_KEY=...
+BACKUP_S3_SECRET_KEY=...
+BACKUP_HEALTHCHECK_URL=https://hc-ping.com/<uuid-nuevo>   # avisa si el backup falla
+```
+
+Rotación: 30 días de `estado`, 90 de `1m`, 400 de `1s`, y nunca menos de tres
+copias por capa aunque las fechas digan otra cosa. Se poda en local y en el
+bucket con la misma política.
+
+**Simulacro de restauración** (hacerlo de vez en cuando; lo que sigue está
+ejecutado y verificado el 2026-08-22):
+
+```bash
+docker compose --profile ops up -d timescaledb-restore     # base de datos limpia, puerto 5435
+SELLO=$(ls -t backups/estado | head -1); F=$(ls -t backups/1m | head -1)
+MAN=$(ls -t backups/manifiesto | head -1)
+docker compose --profile ops run --rm -T restore -dir /backups/estado/$SELLO
+docker compose --profile ops run --rm -T restore -dir /backups/1m/$F -tabla candles_1m
+docker compose --profile ops run --rm -T --entrypoint collector restore \
+  verify-restore -manifiesto /backups/manifiesto/$MAN \
+  -tablas drawings,data_gaps,backfill_progress,job_progress,schema_migrations,candles_1m
+# ✓ candles_1m 3657409 filas · restauración verificada
+docker compose --profile ops rm -f -s timescaledb-restore && docker volume rm collector_tsrestore
+```
+
+Restaurar sobre producción exige `-force` a propósito. Y el esquema se recrea
+solo: `restore` corre las migraciones antes de meter los datos.
+
+### Alertas de precio (bloque 3, RF-6.5)
+
+Proceso **aparte** del colector (`alerts` en el compose, 128 MB): hablar con
+Telegram no puede compartir bucle con la ingesta 24/7. Solo lee `candles_1s`;
+si se cae, la ingesta ni se entera y al volver reanuda por su marca de agua.
+
+Cómo decide:
+
+- Mira el rango `[low, high]` de cada vela de 1s, no solo el cierre: un pico
+  que sube y vuelve dentro del mismo segundo es un cruce de verdad.
+- Cada segundo se evalúa **una vez y ya cerrado**. La vela en curso no vale:
+  el colector la reescribe cada 300 ms y una vela cuyo rango abarca el nivel
+  dispararía en un sentido y en el otro sin parar.
+- Disparador de Schmitt con banda de rearme (`rearm_bps`, 5 bps por defecto):
+  tras avisar al alza hay que SALIR de la banda por abajo para volver a
+  armarse. El precio bailando en el nivel no manda veinte mensajes.
+- Además: `cooldown_sec` (300 s) y `max_per_day` (20, y al pasarlo la alerta
+  se pausa sola). Un cruce dentro del cooldown SE REGISTRA y se ve en el
+  panel, pero no se envía.
+- Reanudar: la marca de agua y los disparos se confirman en la MISMA
+  transacción, así que no se repite ni se pierde nada. Un hueco de más de
+  `ALERT_REPLAY_MAX` (2 h) no se reproduce: queda constancia y se sigue desde
+  el presente. Nadie quiere que al arrancar le lleguen los cruces de ayer.
+
+**Qué tiene que crear el usuario** (cinco minutos, una sola vez):
+
+1. Hablar con **@BotFather** en Telegram → `/newbot` → nombre y usuario
+   acabado en `bot`. Devuelve el token `123456789:AAH...` (es una contraseña).
+2. **Abrir conversación con el bot y enviarle `/start`.** Este paso se lo salta
+   todo el mundo: un bot no puede escribir primero a quien no le ha hablado, y
+   sin esto la API responde `403 bot can't initiate conversation with a user`.
+3. Sacar el chat_id:
+   `curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | jq '.result[0].message.chat.id'`
+   (positivo en privado; negativo, `-100…`, si se usa un grupo).
+4. Añadir a `~/btcdash/collector/.env` y desplegar:
+
+```
+TELEGRAM_BOT_TOKEN=123456789:AAH...
+TELEGRAM_CHAT_ID=12345678
+```
+
+Sin esas dos variables el motor **evalúa y registra igual** —los cruces se ven
+en el panel con `delivery='skipped'`— pero no notifica, y lo avisa en el log al
+arrancar. Para comprobar el camino entero: botón *probar Telegram* del panel,
+que encola un evento y deja que lo mande el motor (así se prueba también que el
+proceso está vivo, no solo la API).
+
+```bash
+docker logs collector-alerts-1 --tail 20
+curl -s http://127.0.0.1:8080/api/alerts/status   # retraso del motor, pendientes, telegram sí/no
+```
+
 ## 7c. Cifras con el histórico completo cargado (2026-08-21, cierre F1b)
 
 Medición con 2 años de 1s + 7 años de 1m cargados y el colector ingiriendo:

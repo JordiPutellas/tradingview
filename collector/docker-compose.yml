@@ -73,6 +73,26 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
 
+  # Motor de alertas de precio (F5, bloque 3). Proceso APARTE del colector a
+  # propósito: hablar con Telegram no puede compartir bucle con la ingesta.
+  # Solo lee candles_1s; si se cae, la ingesta ni se entera.
+  alerts:
+    build: .
+    entrypoint: ["alerts"]
+    restart: unless-stopped
+    mem_limit: 128m
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://btc:${POSTGRES_PASSWORD:-btc}@timescaledb:5432/btc
+      SYMBOL: BTCUSDT
+      # Sin estas dos, las alertas se evalúan y se registran pero NO se
+      # notifican (el proceso lo avisa al arrancar). Van en .env, nunca aquí.
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      ALERT_REPLAY_MAX: ${ALERT_REPLAY_MAX:-2h}
+
   # ---------------------------------------------------------------- BACKUP
   # Copia por capas (F5, bloque 2). No arranca sola: la llama el cron con
   #   docker compose --profile ops run --rm backup -capas estado

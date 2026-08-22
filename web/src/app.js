@@ -8,6 +8,7 @@ import { DrawEngine } from './draw/engine.js';
 import { mountPanel } from './draw/panel.js';
 import { logicalOf as aLogico, timeOfLogical as aTiempo } from './timemap.js';
 import { mountLegend } from './legend.js';
+import { mountAlerts } from './alerts.js';
 
 const $ = (sel) => document.querySelector(sel);
 const statusEl = $('#status');
@@ -538,6 +539,10 @@ function sincronizarBotones() {
 }
 mountPanel(engine, $('#drawPanel'));
 
+// ---------- alertas de precio (F5) ----------
+// El motor está en el servidor; aquí solo se crean, se ven y se borran.
+const alertas = mountAlerts({ chart, series, container, panelEl: $('#alertPanel'), cfg: CONFIG });
+
 // ---------- legend OHLC (F4-3.2) ----------
 legend = mountLegend({
   chart, series, el: $('#legend'), getBars: () => bars, up: UP, down: DOWN,
@@ -605,6 +610,7 @@ document.querySelectorAll('.tools button').forEach(b => {
     if (t === '__hide') { b.blur(); engine.setOcultos(!engine.ocultos); return; }
     if (t === '__lock') { b.blur(); engine.setBloqueados(!engine.bloqueados); return; }
     if (t === '__cross') { b.blur(); setCrosshair(!sinCrosshair); return; }
+    if (t === '__alerts') { b.blur(); alertas.abrirPanel(); return; }
     engine.setTool(engine.activeTool() === t ? null : t);
   };
 });
@@ -665,4 +671,4 @@ window.__test = { bucketStart, fmtTick, fmtFull, TFS, loadTF, chart, series,
   getBars: () => bars, getTF: () => tf, CONFIG, tfsEl, toolsEl, engine,
   panelEl: $('#drawPanel'), legendEl: $('#legend'), legend,
   visibleTimeRange, vistaGuardada, VIEW_KEY, isLive: () => liveEdge,
-  sinCrosshair: () => sinCrosshair, setCrosshair };
+  sinCrosshair: () => sinCrosshair, setCrosshair, alertas };
