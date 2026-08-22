@@ -351,6 +351,89 @@ check('el contrazoom máximo deja velas en pantalla',
   zoomOut.up + zoomOut.down > 1000 && zr.dentro > (zr.to - zr.from) * 0.5 && vacio < 0.05,
   `${zoomOut.up + zoomOut.down} px de vela · rango ${zr.from.toFixed(0)}..${zr.to.toFixed(0)} sobre ${zr.n} velas · ${(vacio * 100).toFixed(1)}% vacío a la derecha`);
 
+// 11c. F5a — con hueco a la derecha, la rueda NO pega el precio al borde.
+// Se mide en píxeles: la x de la última vela pintada. Antes del arreglo, la
+// primera muesca recortaba el rango a n+gap y la vela saltaba al borde derecho
+// (frac 0,5 → 1,0), así que el zoom acababa centrado en otro sitio.
+const bordeVelas = () => {
+  const esVela = (d, i) => (d[i] === 112 && d[i + 1] === 146 && d[i + 2] === 190)
+    || (d[i] === 218 && d[i + 1] === 218 && d[i + 2] === 218);
+  const cs = [...document.querySelectorAll('#chart canvas')];
+  const area = Math.max(...cs.map(c => c.width * c.height));
+  let maxX = -1, w = 0;
+  for (const c of cs) {
+    if (c.width * c.height < area * 0.9) continue;   // fuera escalas de precio/tiempo
+    w = c.width;
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    // La línea de último precio cruza TODO el ancho pintada del color de la
+    // vela: sin descartarla, la "última vela" salía siempre en el borde
+    // derecho y la comprobación no medía nada.
+    const anchas = new Set();
+    for (let y = 0; y < c.height; y++) {
+      let cuenta = 0;
+      for (let x = 0; x < w; x++) if (esVela(d, (y * w + x) * 4)) cuenta++;
+      if (cuenta > w * 0.5) anchas.add(y);
+    }
+    for (let y = 0; y < c.height; y++) {
+      if (anchas.has(y)) continue;
+      for (let x = w - 1; x > maxX; x--) if (esVela(d, (y * w + x) * 4)) { maxX = x; break; }
+    }
+  }
+  return { frac: w ? maxX / w : -1, maxX, w };
+};
+const conHueco = async () => {
+  await page.evaluate(() => {
+    const n = window.__test.getBars().length;
+    window.__test.chart.timeScale().setVisibleLogicalRange({ from: n - 400, to: n + 400 });
+  });
+  await page.waitForTimeout(500);
+};
+const rangoLog = () => page.evaluate(() => {
+  const r = window.__test.chart.timeScale().getVisibleLogicalRange();
+  return { ...r, n: window.__test.getBars().length, hueco: (r.to - window.__test.getBars().length) / (r.to - r.from) };
+});
+await conHueco();
+const hb0 = await page.evaluate(`(${bordeVelas.toString()})()`);
+await page.mouse.move(700, 400);
+await page.mouse.wheel(0, 100);                       // alejar una muesca
+await page.waitForTimeout(400);
+const hb1 = await page.evaluate(`(${bordeVelas.toString()})()`);
+const hr1 = await rangoLog();
+check('alejando con hueco a la derecha, la última vela no salta al borde',
+  Math.abs(hb1.frac - hb0.frac) < 0.06 && hr1.hueco > 0.35,
+  `última vela en ${(hb0.frac * 100).toFixed(1)}% → ${(hb1.frac * 100).toFixed(1)}% del ancho · ` +
+  `hueco ${(hr1.hueco * 100).toFixed(1)}%`);
+
+await conHueco();
+const hb2 = await page.evaluate(`(${bordeVelas.toString()})()`);
+await page.mouse.move(400, 400);
+for (let i = 0; i < 3; i++) await page.mouse.wheel(0, -100);   // acercar sobre las velas
+await page.waitForTimeout(400);
+const hb3 = await page.evaluate(`(${bordeVelas.toString()})()`);
+const hr3 = await rangoLog();
+check('acercando tampoco: el hueco sigue ahí y el zoom es donde apunta el ratón',
+  hb3.frac < 0.98 && hr3.hueco > 0.2 && (hr3.to - hr3.from) < 400 * 2 * 0.9,
+  `última vela en ${(hb3.frac * 100).toFixed(1)}% · hueco ${(hr3.hueco * 100).toFixed(1)}% · ` +
+  `${(hr3.to - hr3.from).toFixed(0)} velas de ventana (eran 800)`);
+
+// y el cambio de temporalidad con las flechas conserva ese mismo hueco
+await conHueco();
+const hb4 = await page.evaluate(`(${bordeVelas.toString()})()`);
+const tf4 = await page.evaluate(() => window.__test.getTF().name);
+await page.keyboard.press('ArrowUp');
+await page.waitForFunction((t) => window.__test.getTF().name !== t, tf4, { timeout: 20000 });
+await page.waitForTimeout(2000);
+const hb5 = await page.evaluate(`(${bordeVelas.toString()})()`);
+const hr5 = await rangoLog();
+check('cambiar de temporalidad con las flechas respeta el hueco',
+  Math.abs(hb5.frac - hb4.frac) < 0.08 && hr5.hueco > 0.35,
+  `${tf4} → ${await page.evaluate(() => window.__test.getTF().name)} · ` +
+  `última vela ${(hb4.frac * 100).toFixed(1)}% → ${(hb5.frac * 100).toFixed(1)}% · ` +
+  `hueco ${(hr5.hueco * 100).toFixed(1)}%`);
+await page.evaluate(() => { localStorage.removeItem('btcdash.view'); });
+await page.reload();
+await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
+
 // 12. F2b — autoescala con el GESTO del usuario: dibujo lejos del precio
 // visible (dibujado a 77k, mirando 2019 a 10k) y doble click en la escala.
 // El de F2a llamaba a applyOptions({autoScale:true}) y medía coordenadas; este

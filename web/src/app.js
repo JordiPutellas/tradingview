@@ -177,16 +177,27 @@ container.addEventListener('wheel', (e) => {
   // empujado fuera de la pantalla — solo fondo. El tope de alejamiento es
   // "todo lo cargado" (que crece solo al desplazarse al pasado) y la ventana
   // se recoloca para que SIEMPRE queden velas a la vista.
+  //
+  // El hueco que ya haya a la derecha de la última vela se RESPETA: se mide en
+  // fracción de pantalla y se conserva al escalar. Recortarlo a `gap` a secas
+  // pegaba el precio al borde derecho de un salto en cuanto tocabas la rueda,
+  // y el zoom acababa centrado donde no era (F5a).
   const n = bars.length || 1;
-  const gap = Math.min(60, Math.max(3, n * 0.05));  // margen a los lados, en velas
-  const maxSpan = n + 2 * gap;                      // alejarse más no enseña nada nuevo
+  const gap = Math.min(60, Math.max(3, n * 0.05));  // margen mínimo a los lados, en velas
+  // Hueco a la derecha POR ENCIMA del margen mínimo: ese es el que ha puesto el
+  // usuario desplazando el gráfico y el que hay que respetar. Contando `gap`
+  // dentro, el propio margen se convertía en fracción de pantalla, se
+  // conservaba a sí mismo y el vacío crecía solo muesca tras muesca.
+  const hueco = Math.min(0.75, Math.max(0, (range.to - n - gap) / span));
+  const maxSpan = (n + 2 * gap) / (1 - hueco);      // alejarse más no enseña nada nuevo
   const newSpan = Math.max(6, Math.min(span * Math.pow(1 + CONFIG.wheelZoom, notches), maxSpan));
-  let from = anchor - frac * newSpan, to = from + newSpan;
-  // Con newSpan <= n + 2*gap, el primer recorte ya deja from >= -gap: los dos
-  // topes no pueden pelearse (si lo hacían, el hueco se iba entero a un lado).
-  if (to > n + gap) { to = n + gap; from = to - newSpan; }
-  if (from < -gap) { from = -gap; to = from + newSpan; }
-  ts.setVisibleLogicalRange({ from, to });
+  // Topes de la ventana. El de la derecha lleva el hueco escalado, así que el
+  // vacío mantiene su tamaño EN PANTALLA en vez de desaparecer de un salto.
+  const minL = -gap, maxL = n + gap + hueco * newSpan;
+  const from = maxL - minL <= newSpan
+    ? (minL + maxL - newSpan) / 2                   // no cabe entre los topes: céntrala
+    : Math.min(Math.max(anchor - frac * newSpan, minL), maxL - newSpan);
+  ts.setVisibleLogicalRange({ from, to: from + newSpan });
 }, { passive: false });
 const toCandle = ([t, o, h, l, c]) => ({ time: t, open: o, high: h, low: l, close: c });
 
@@ -307,7 +318,12 @@ function mismasVelas(next) {
   if (!r || !v) return {};                       // sin datos aún: carga normal
   const velas = Math.max(CONFIG.tfChangeMinBars,
     Math.min(CONFIG.tfChangeMaxBars, r.to - r.from));
-  if (liveEdge && r.to >= bars.length - 1) return { view: null, span: velas };
+  if (liveEdge && r.to >= bars.length - 1) {
+    // El hueco a la derecha viaja con la vista: si no, cambiar de timeframe lo
+    // borraba y el precio saltaba al borde, igual que hacía la rueda (F5a).
+    const hueco = Math.min(0.75, Math.max(0, (r.to - bars.length) / (r.to - r.from)));
+    return { view: null, span: velas, hueco };
+  }
   const centro = (v.from + v.to) / 2, mitad = (velas * pasoDe(next)) / 2;
   return { view: { from: centro - mitad, to: centro + mitad } };
 }
@@ -348,7 +364,9 @@ async function cargarTF(next, opts, vista, mine, señal) {
     // aplicarse y leerlo aquí dejaba la ventana semanas por detrás del
     // presente (lo pilló el test del borde derecho con las flechas).
     const n = bars.length;
-    chart.timeScale().setVisibleLogicalRange({ from: n - span, to: n });
+    const hueco = Math.min(0.75, Math.max(0, opts.hueco || 0));
+    chart.timeScale().setVisibleLogicalRange(
+      { from: n - span * (1 - hueco), to: n + span * hueco });
   }
   avisar(vista ? 'sin datos en ese tramo' : '');
   saveView();

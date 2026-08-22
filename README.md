@@ -211,6 +211,7 @@ hit-test de cada figura son nuestros.
 - **RF-5.26** (F5) Alertas de precio desde el gráfico: **click derecho** en un nivel para crearla, línea ámbar discontinua con su etiqueta en la escala, y panel para ver, editar (dirección, modo, nota), rearmar y borrar
 - **RF-5.24** (F4b) La barra de herramientas de dibujo es una **columna fija en el lateral izquierdo** que ocupa su sitio en el layout: no flota, no se arrastra y nunca tapa el precio
 - **RF-5.25** (F4b) El rectángulo tiene **ocho tiradores**: cuatro esquinas —que mueven los dos ejes— y cuatro centros de lado, que ajustan solo el alto o solo el ancho sin tocar el otro anclaje, como en TradingView
+- **RF-5.27** (F5a) El **hueco a la derecha** de la última vela se respeta al hacer zoom con la rueda y al cambiar de temporalidad con las flechas: se mide en fracción de pantalla y se conserva al escalar, en vez de recortarse pegando el precio al borde derecho de un salto. El zoom sigue haciéndose alrededor del cursor
 - **RF-5.23** (F4) **Imán** (botón o `M`) que engancha el punto al máximo/mínimo/apertura/cierre de la vela más cercana dentro de `cfg.magnetPx`; **ocultar** todos los dibujos (`H`), **candado** global (`L`) y **quitar el crosshair** (`X`, líneas y etiquetas de los ejes), los tres recordados entre sesiones; **duplicar** con Ctrl+C/Ctrl+V o Alt+arrastrar
 
 ### RF-6 — Operación
