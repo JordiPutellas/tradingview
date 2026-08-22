@@ -29,6 +29,9 @@ const CONFIG = {
   priceMarginBottom: cfgNum('priceMarginBottom', 0.16),
   // 0 = el autoajuste mira solo las velas; 1 = también los dibujos.
   drawingsAutoscale: cfgNum('drawingsAutoscale', 0) === 1,
+  // Radio del imán en píxeles (F4-3.3): a cuánto tiene que estar el cursor
+  // del máximo/mínimo/apertura/cierre de la vela para engancharse.
+  magnetPx: cfgNum('magnetPx', 12),
   // Tope de velas VISIBLES al conservar el rango cambiando de timeframe
   // (F4-1.1). Dos años en 1h son ~17.500 velas; en 1s serían 60 millones.
   // Pasado el tope se centra en el mismo instante y se enseñan las que caben.
@@ -466,16 +469,25 @@ const engine = new DrawEngine({
   getBars: () => bars,
   getStep: barStep,
   autoscaleWithShapes: () => CONFIG.drawingsAutoscale,
+  magnetPx: () => CONFIG.magnetPx,
+  onFlags: () => sincronizarBotones(),
   onSave: (id, payload) => fetch(`/api/drawings/${id}`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
   }).catch(() => {}),
   onDelete: (id) => fetch(`/api/drawings/${id}`, { method: 'DELETE' }).catch(() => {}),
-  onSelect: () => {
-    document.querySelectorAll('.tools button').forEach(b => {
-      b.classList.toggle('active', b.dataset.tool === engine.activeTool());
-    });
-  },
+  onSelect: () => sincronizarBotones(),
 });
+
+// Estado visible de la barra de herramientas: la herramienta activa y los
+// interruptores que no son herramientas (imán).
+function sincronizarBotones() {
+  const activa = engine.activeTool();
+  document.querySelectorAll('.tools button').forEach(b => {
+    const t = b.dataset.tool;
+    if (t === '__magnet') b.classList.toggle('active', engine.iman);
+    else b.classList.toggle('active', t === activa);
+  });
+}
 mountPanel(engine, $('#drawPanel'));
 
 // ---------- legend OHLC (F4-3.2) ----------
@@ -530,6 +542,7 @@ document.querySelectorAll('.tools button').forEach(b => {
     const t = b.dataset.tool;
     if (t === '__clear') { engine.deleteSelected(); return; }
     if (t === '__measure') { engine.armMeasure(); return; }
+    if (t === '__magnet') { b.blur(); engine.setIman(!engine.iman); return; }
     engine.setTool(engine.activeTool() === t ? null : t);
   };
 });
@@ -561,6 +574,8 @@ function onTfUp() {
 tfsEl.addEventListener('click', (e) => {
   if (tfDragged) { e.stopPropagation(); e.preventDefault(); tfDragged = false; }
 }, true);
+
+sincronizarBotones();   // el imán guardado tiene que verse encendido al entrar
 
 // ---------- barra de dibujo flotante ----------
 // Arrastrable por el asa y con la posición guardada entre sesiones.

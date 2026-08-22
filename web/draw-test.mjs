@@ -770,6 +770,71 @@ check('el historial aguanta más de 50 pasos', antesPila === 55 && trasPila === 
 await limpiar();
 await wait(600);
 
+
+// -------------------------------------------------------------- F4-3.3 imán
+await limpiar();
+// Un objetivo concreto: el máximo de una vela a la vista, con sus coordenadas
+// según LWC (timeToCoordinate / priceToCoordinate), no según el motor.
+const diana = async () => {
+  // Acercar primero: con el gráfico alejado una vela mide un píxel y varias
+  // comparten máximo dentro del radio del imán, así que "la vela de al lado"
+  // sería una respuesta igual de buena y el test no podría exigir una.
+  await page.evaluate(() => {
+    const b = window.__test.getBars().length;
+    window.__test.chart.timeScale().setVisibleLogicalRange({ from: b - 120, to: b - 1 });
+  });
+  await wait(600);
+  return page.evaluate(() => {
+  const { chart, series, engine, getBars } = window.__test;
+  const ts = chart.timeScale();
+  const r = ts.getVisibleLogicalRange();
+  const b = getBars();
+  const i = Math.min(b.length - 1, Math.max(0, Math.round((r.from + r.to) / 2)));
+  const vela = b[i];
+  const rect = engine.paneRect();
+  return { t: vela[0], high: vela[2], low: vela[3], open: vela[1], close: vela[4],
+    x: rect.left + ts.timeToCoordinate(vela[0]), y: rect.top + series.priceToCoordinate(vela[2]) };
+  });
+};
+const d = await diana();
+await page.click('button[data-tool="__magnet"]');
+await wait(200);
+check('el botón del imán se enciende',
+  await page.evaluate(() => window.__test.engine.iman === true
+    && document.querySelector('button[data-tool="__magnet"]').classList.contains('active')));
+await page.click('button[data-tool="point"]');
+await page.mouse.click(d.x + 1, d.y - 7);        // 7 px por encima del máximo
+await wait(500);
+const conIman = (await estado()).figuras[0].pts[0];
+check('con el imán, el punto cae EXACTAMENTE en el máximo de la vela',
+  conIman.p === d.high && conIman.t === d.t,
+  `clic a 7 px del máximo ${d.high} → ${conIman.p} (vela ${d.t} vs ${conIman.t})`);
+
+await limpiar();
+await page.keyboard.press('m');                   // atajo de teclado
+await wait(200);
+check('la tecla M apaga el imán',
+  await page.evaluate(() => window.__test.engine.iman === false));
+await page.click('button[data-tool="point"]');
+await page.mouse.click(d.x + 1, d.y - 7);
+await wait(500);
+const sinIman = (await estado()).figuras[0].pts[0];
+check('sin imán, el punto se queda donde se pinchó',
+  sinIman.p !== d.high && Math.abs(sinIman.p - d.high) > 0.01,
+  `${sinIman.p.toFixed(2)} vs máximo ${d.high}`);
+
+// el imán se acuerda entre sesiones
+await page.keyboard.press('m');
+await wait(200);
+await page.reload();
+await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
+await wait(700);
+check('el imán se recuerda entre sesiones',
+  await page.evaluate(() => window.__test.engine.iman === true
+    && document.querySelector('button[data-tool="__magnet"]').classList.contains('active')));
+await page.evaluate(() => window.__test.engine.setIman(false));
+await limpiar();
+
 // --------------------------------------------------- 9. limpieza final
 await page.evaluate(async () => {
   for (const d of await (await fetch('/api/drawings')).json()) {

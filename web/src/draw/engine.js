@@ -18,8 +18,12 @@ import { History } from './history.js';
 const PERSIST_MS = 400;
 const uuid = () => crypto.randomUUID();
 
+// Ajustes que viven en el navegador (como la posición de la barra): el imán.
+const FLAG_IMAN = 'btcdash.iman';
+
 export class DrawEngine {
-  constructor({ chart, series, container, getBars, getStep, onSave, onDelete, onSelect, autoscaleWithShapes }) {
+  constructor({ chart, series, container, getBars, getStep, onSave, onDelete, onSelect,
+    autoscaleWithShapes, magnetPx, onFlags }) {
     this.chart = chart;
     this.series = series;
     this.container = container;
@@ -29,6 +33,9 @@ export class DrawEngine {
     this.onDelete = onDelete || (() => {});
     this.onSelect = onSelect || (() => {});
     this.autoscaleWithShapes = autoscaleWithShapes || (() => false);
+    this.magnetPx = magnetPx || (() => 12);
+    this.onFlags = onFlags || (() => {});
+    this.iman = localStorage.getItem(FLAG_IMAN) === '1';   // F4-3.3
 
     this.shapes = [];
     this.estilos = new Estilos();           // estilo por defecto y plantillas (F4-2)
@@ -365,8 +372,47 @@ export class DrawEngine {
   // Un punto solo vale si las dos conversiones han salido bien: si no, se
   // acabaría guardando {t:null,p:null}, que al recargar rompe el pintado.
   _pt(q) {
+    if (this.iman) {
+      const m = this._imanar(q.x, q.y);
+      if (m) return { t: m.t, p: m.p };
+    }
     const t = this.timeOfX(q.x), p = this.priceOfY(q.y);
     return Number.isFinite(t) && Number.isFinite(p) ? { t, p } : null;
+  }
+
+  // ---------- imán (F4-3.3) ----------
+  // Engancha el punto al open/high/low/close de la vela más cercana si cae a
+  // menos de magnetPx() píxeles. Devuelve también el TIEMPO de esa vela: un
+  // nivel marcado en un máximo tiene que caer sobre el máximo, no al lado.
+  _imanar(x, y) {
+    const bars = this.getBars();
+    if (!bars.length) return null;
+    const l = this.logicalOfX(x);
+    if (l === null) return null;
+    const centro = Math.max(0, Math.min(bars.length - 1, Math.round(l)));
+    const tol = this.magnetPx();
+    let mejor = null;
+    // La vela de al lado también entra: alejado el gráfico una vela mide un
+    // píxel, y clavar el cursor en la de en medio es imposible. Manda la
+    // distancia vertical, que es la que se ve.
+    for (let i = Math.max(0, centro - 1); i <= Math.min(bars.length - 1, centro + 1); i++) {
+      const b = bars[i];
+      for (const v of [b[1], b[2], b[3], b[4]]) {
+        const yv = this.yOf(v);
+        if (yv === null) continue;
+        const d = Math.abs(yv - y);
+        if (d <= tol && (!mejor || d < mejor.d || (d === mejor.d && i === centro))) {
+          mejor = { d, t: b[0], p: v };
+        }
+      }
+    }
+    return mejor;
+  }
+
+  setIman(on) {
+    this.iman = !!on;
+    localStorage.setItem(FLAG_IMAN, this.iman ? '1' : '0');
+    this.onFlags(this);
   }
 
   static valido(s) {
@@ -414,11 +460,14 @@ export class DrawEngine {
       const targets = type.handleTargets
         ? type.handleTargets(this.drag.idx)
         : [{ i: this.drag.idx, axes: 'xy' }];
+      // Con el imán, un punto de control se engancha igual que al dibujarlo.
+      const m = this.iman ? this._imanar(x, y) : null;
       for (const tg of targets) {
         const snap = this.drag.snap[tg.i];
         if (!snap) continue;
         const q = s.points[tg.i];
-        const t = this.timeOfLogical(snap.l + dl), pr = this.priceOfY(snap.y + dy);
+        const t = m ? m.t : this.timeOfLogical(snap.l + dl);
+        const pr = m ? m.p : this.priceOfY(snap.y + dy);
         if (tg.axes.includes('x') && Number.isFinite(t)) q.t = t;
         if (tg.axes.includes('y') && Number.isFinite(pr)) q.p = pr;
       }
@@ -462,6 +511,10 @@ export class DrawEngine {
       return;
     }
     if ((e.key === 'Delete' || e.key === 'Backspace') && !escribiendo) this.deleteSelected();
+    if (!escribiendo && !e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'm' || e.key === 'M')) {
+      this.setIman(!this.iman);
+      return;
+    }
     // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y. Escribiendo en un campo manda el
     // deshacer del navegador, que es lo que espera cualquiera.
     const mod = e.ctrlKey || e.metaKey;
