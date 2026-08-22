@@ -3,13 +3,25 @@ package api
 import (
 	"context"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"jputellas.dev/btcdash/collector/internal/seed"
 )
+
+// dbName saca el nombre de la base de datos de una URL postgres://.
+func dbName(dbURL string) string {
+	u, err := url.Parse(dbURL)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimPrefix(u.Path, "/")
+}
 
 // Cobertura mínima exigible a cada timeframe. Absoluta a propósito: la
 // retención es infinita (README, sec. 6), así que estos umbrales no caducan.
@@ -29,6 +41,12 @@ func TestTimeframeCoverage(t *testing.T) {
 	url := os.Getenv("DATABASE_URL")
 	if url == "" {
 		t.Skip("sin DATABASE_URL: test de cobertura contra la BD real")
+	}
+	// Los umbrales de abajo son del histórico REAL. Contra la base de datos de
+	// test (semilla sintética de unos meses) fallarían siempre y no dirían
+	// nada: este test habla de producción.
+	if strings.HasSuffix(dbName(url), seed.Sufijo) {
+		t.Skip("base de datos de test: la cobertura se mide contra producción")
 	}
 	symbol := os.Getenv("SYMBOL")
 	if symbol == "" {

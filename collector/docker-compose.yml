@@ -73,5 +73,69 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
 
+  # ---------------------------------------------------------------- TEST
+  # Entorno de test (F5, bloque 1). NO arranca solo: hay que pedirlo con
+  #   docker compose --profile test up -d timescaledb-test
+  # Existe porque hasta F4 las suites de frontend corrían contra la base de
+  # datos de producción y llegaron a borrar los dibujos del usuario. Instancia
+  # aparte, volumen aparte, puerto aparte: nada que puedan tocar por error.
+  timescaledb-test:
+    profiles: ["test"]
+    image: timescale/timescaledb:2.17.2-pg16
+    restart: "no"          # se enciende a mano y se apaga al terminar
+    mem_limit: 256m
+    environment:
+      POSTGRES_USER: btc
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-btc}
+      POSTGRES_DB: btc_test
+      TS_TUNE_MEMORY: 160MB
+      TS_TUNE_NUM_CPUS: "1"
+    command: >-
+      postgres
+      -c shared_buffers=48MB
+      -c effective_cache_size=128MB
+      -c maintenance_work_mem=32MB
+      -c max_connections=20
+    volumes:
+      - tstest:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U btc -d btc_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # Semilla: histórico sintético reproducible. La URL de test va aquí dentro
+  # a propósito, para que no haya forma de apuntarla a producción desde la
+  # línea de órdenes.  docker compose --profile test run --rm seed-test -days 400
+  seed-test:
+    profiles: ["test"]
+    build: .
+    entrypoint: ["collector", "seed-test"]
+    mem_limit: 256m
+    depends_on:
+      timescaledb-test:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://btc:${POSTGRES_PASSWORD:-btc}@timescaledb-test:5432/btc_test
+      SYMBOL: BTCUSDT
+
+  # Feeder: una vela de 1s por segundo con su NOTIFY, para que el test de
+  # streaming tenga algo que ver moverse.
+  feeder-test:
+    profiles: ["test"]
+    build: .
+    entrypoint: ["collector", "seed-test", "-live"]
+    restart: "no"
+    mem_limit: 128m
+    depends_on:
+      timescaledb-test:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://btc:${POSTGRES_PASSWORD:-btc}@timescaledb-test:5432/btc_test
+      SYMBOL: BTCUSDT
+
 volumes:
   tsdata:
+  tstest:

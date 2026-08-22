@@ -1,5 +1,5 @@
 // Test funcional headless del frontend F1c contra la API real.
-// Uso: node app-test.mjs  (API en 127.0.0.1:8090 sirviendo web/dist)
+// Uso: ./run-tests.sh desde la raíz (levanta la BD de test, la siembra y la API)
 import { chromium } from 'playwright';
 import { existsSync } from 'node:fs';
 
@@ -24,34 +24,43 @@ const check = (name, ok, extra = '') => {
 };
 
 
-// La base de datos es la MISMA que usa el usuario (el API local va por el túnel
-// contra jordios): esta suite borra la tabla de dibujos para trabajar en
-// limpio, así que primero se guarda lo que haya y al terminar se repone. Un
-// PUT con el mismo id es upsert, o sea que la restauración es exacta salvo el
-// updated_at. Se repone también si la suite se cae a media ejecución.
-const API = 'http://127.0.0.1:8090';
-const previos = await (await fetch(`${API}/api/drawings`)).json();
-if (previos.length) console.log(`(guardados ${previos.length} dibujos del usuario para reponerlos al final)`);
-async function restaurar() {
-  for (const d of await (await fetch(`${API}/api/drawings`)).json()) {
-    await fetch(`${API}/api/drawings/${d.id}`, { method: 'DELETE' });
-  }
-  for (const d of previos) {
-    await fetch(`${API}/api/drawings/${d.id}`, { method: 'PUT',
-      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d.payload) });
-  }
-  if (previos.length) console.log(`(repuestos ${previos.length} dibujos del usuario)`);
-}
-for (const ev of ['uncaughtException', 'unhandledRejection']) {
-  process.on(ev, async (e) => { console.error(e); await restaurar(); process.exit(1); });
+// ---------------------------------------------------------------------------
+// Esta suite BORRA dibujos y trabaja a lo bruto: solo puede correr contra la
+// base de datos de TEST. La API publica su nombre en /api/health y aquí se
+// comprueba antes de tocar nada. En F4 esto no existía, las suites corrían
+// contra producción y se llevaron por delante los dibujos del usuario.
+//
+// Se levanta todo con ./run-tests.sh desde la raíz del repo.
+const API = process.env.API_BASE || 'http://127.0.0.1:8090';
+const salud = await fetch(`${API}/api/health`).then(r => r.json()).catch(() => ({}));
+if (!/_test$/.test(salud.db || '')) {
+  console.error(`ABORTADO: la API sirve la base de datos "${salud.db || '?'}", que no es de test.`);
+  console.error('Arranca el entorno con ./run-tests.sh (raíz del repo).');
+  process.exit(2);
 }
 
-await page.goto('http://127.0.0.1:8090/');
+// Ventana de la semilla: los tests de navegación se mueven DENTRO de ella, no
+// sobre años fijos. La semilla es sintética y su ventana va con el reloj.
+const DIA = 86400;
+const dias1D = await (await fetch(`${API}/api/candles?tf=1D&from=0&limit=1`)).json();
+if (!dias1D.length) {
+  console.error('ABORTADO: la base de datos de test está vacía.');
+  console.error('Siembra con: docker compose --profile test run --rm seed-test');
+  process.exit(2);
+}
+const primerDia = dias1D[0][0];
+const dias = (n) => primerDia + n * DIA;
+
+await page.goto(API + '/');
 await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
-// Los dibujos que haya en la BD son del usuario y se pintarían encima de las
-// comprobaciones de píxeles (una zona de dos niveles cruza el lienzo entero).
-// Se ocultan con el interruptor de F4-3.4, que no toca la base de datos.
-await page.evaluate(() => window.__test.engine.setOcultos(true));
+// Restos de una pasada anterior de la propia suite: fuera, que se pintan
+// encima de las comprobaciones de píxeles.
+await page.evaluate(async () => {
+  window.__test.engine.clear();
+  for (const d of await (await fetch('/api/drawings')).json()) {
+    await fetch(`/api/drawings/${d.id}`, { method: 'DELETE' });
+  }
+});
 
 // 1. carga inicial
 const n0 = await page.evaluate(() => window.__test.getBars().length);
@@ -85,7 +94,7 @@ const anchors = await page.evaluate(() => {
 check('1W ancla en lunes', anchors.week === Date.UTC(2026, 7, 17) / 1000, new Date(anchors.week * 1000).toUTCString());
 check('1M ancla a día 1', anchors.month === Date.UTC(2026, 7, 1) / 1000);
 check('3M ancla a julio', anchors.quarter === Date.UTC(2026, 6, 1) / 1000);
-const weekBars = await (await fetch('http://127.0.0.1:8090/api/candles?tf=1W&limit=4')).json();
+const weekBars = await (await fetch(`${API}/api/candles?tf=1W&limit=4`)).json();
 check('API 1W devuelve lunes 00:00Z', weekBars.every(r => new Date(r[0] * 1000).getUTCDay() === 1 && r[0] % 86400 === 0),
   weekBars.map(r => new Date(r[0] * 1000).toUTCString()).join(' | '));
 
@@ -111,10 +120,19 @@ const after = await page.evaluate(() => window.__test.getBars().length);
 check('lazy-loading histórico', after > before, `${before} → ${after} velas`);
 
 // 6. streaming en vivo (la vela en curso se actualiza)
-// El test 5 dejó la vista en el pasado y con F4-1.1 el cambio de timeframe la
-// conserva: hay que volver al presente, que es justo lo que hace End.
+// Con F4-1.1 el cambio de timeframe conserva el tramo, así que primero se
+// pone la vista en un pasado con datos y luego se comprueba que End vuelve.
 await page.click('button[data-tf="1s"]');
 await page.waitForFunction(() => window.__test.getTF().name === '1s' && window.__test.getBars().length > 100, { timeout: 20000 });
+// Ventana explícita en el pasado y DENTRO de la cobertura de 1s. Antes se
+// aprovechaba donde hubiera dejado la vista el paneo del test anterior, que no
+// es determinista: si cae fuera del tramo con velas de 1s, el frontend hace lo
+// correcto —volver al presente— y el check fallaba por el motivo equivocado.
+await page.evaluate(() => {
+  const ahora = Math.floor(Date.now() / 1000);
+  return window.__test.loadTF(window.__test.getTF(), { view: { from: ahora - 5400, to: ahora - 3600 } });
+});
+await page.waitForTimeout(1800);
 check('con la ventana en el pasado el frontend lo sabe',
   (await page.evaluate(() => window.__test.isLive())) === false);
 await page.keyboard.press('End');
@@ -340,14 +358,13 @@ check('el contrazoom máximo deja velas en pantalla',
 async function autoscaleProbe() {
   await page.click('button[data-tf="1D"]');
   await page.waitForFunction(() => window.__test.getTF().name === '1D' && window.__test.getBars().length > 100, { timeout: 20000 });
-  // Irse a 2019 (el precio es una fracción del actual) y dibujar una
-  // horizontal al precio de HOY: si el autoajuste mirara los dibujos, la
-  // escala tendría que estirarse hasta los 77k.
+  // Una horizontal al TRIPLE del precio visible: si el autoajuste mirara los
+  // dibujos, la escala tendría que estirarse hasta ahí. No depende de cómo sea
+  // el histórico, solo de que el dibujo esté lejos.
   const far = await page.evaluate(async () => {
-    const { getBars, engine, loadTF, getTF } = window.__test;
-    const price = getBars().at(-1)[4];
-    await loadTF(getTF(), { view: { from: Date.UTC(2019, 10, 1) / 1000, to: Date.UTC(2020, 0, 1) / 1000 } });
+    const { getBars, engine } = window.__test;
     const bars = getBars();
+    const price = bars.at(-1)[4] * 3;
     engine.addShape('hline', [{ t: bars.at(-1)[0], p: price }], { id: 'zz-autoscale-test' });
     return price;
   });
@@ -472,25 +489,25 @@ check('el rango visible sobrevive al cambio de timeframe (1h→5m)',
 check('y el destino trae las velas que tocan', v5m.velas > 1000 && v5m.velas < 1600,
   `${Math.round(v5m.velas)} velas de 5m para ${Math.round(v1h.velas)} de 1h`);
 
-// 15.2 — histórico profundo (2020), no solo cerca del presente
+// 15.2 — el principio del histórico cargado, no solo cerca del presente
 await irTF('1D');
-await page.evaluate(() => window.__test.loadTF(window.__test.getTF(),
-  { view: { from: Date.UTC(2020, 2, 1) / 1000, to: Date.UTC(2020, 3, 1) / 1000 } }));
+await page.evaluate((v) => window.__test.loadTF(window.__test.getTF(), { view: v }),
+  { from: dias(20), to: dias(50) });
 await page.waitForTimeout(2500);
 const v2020 = await vista();
-check('se puede saltar a un tramo del histórico profundo',
-  Math.abs(v2020.from - Date.UTC(2020, 2, 1) / 1000) < 2 * 86400, iso(v2020.from));
+check('se puede saltar a un tramo del principio del histórico',
+  Math.abs(v2020.from - dias(20)) < 2 * DIA, iso(v2020.from));
 await irTF('1h');
 const v2020h = await vista();
-check('el rango se conserva también en 2020 (1D→1h)',
+check('el rango se conserva también en el pasado (1D→1h)',
   mismoRango(v2020, v2020h, '1D', '1h'), `${iso(v2020.from)}…${iso(v2020.to)} → ${iso(v2020h.from)}…${iso(v2020h.to)}`);
 check('y con la ventana en el pasado el streaming no toca las velas',
   (await page.evaluate(() => window.__test.isLive())) === false);
 
 // 15.3 — tope de velas: 1D sobre un año → 1m centra en el mismo instante
 await irTF('1D');
-await page.evaluate(() => window.__test.loadTF(window.__test.getTF(),
-  { view: { from: Date.UTC(2025, 0, 1) / 1000, to: Date.UTC(2026, 0, 1) / 1000 } }));
+await page.evaluate((v) => window.__test.loadTF(window.__test.getTF(), { view: v }),
+  { from: dias(5), to: dias(370) });
 await page.waitForTimeout(2500);
 const vAnio = await vista();
 await irTF('1m');
@@ -515,8 +532,8 @@ check('bajo el suelo, el cambio ensancha en vez de dejar una vela',
 
 // 15.5 — velas nuevas por la derecha con la ventana en el pasado
 await irTF('1h');
-await page.evaluate(() => window.__test.loadTF(window.__test.getTF(),
-  { view: { from: Date.UTC(2021, 4, 1) / 1000, to: Date.UTC(2021, 4, 10) / 1000 } }));
+await page.evaluate((v) => window.__test.loadTF(window.__test.getTF(), { view: v }),
+  { from: dias(100), to: dias(109) });
 await page.waitForTimeout(2500);
 const antesRueda = await vista();
 const nAntes = await page.evaluate(() => window.__test.getBars().length);
@@ -564,8 +581,8 @@ check('flecha arriba sube al siguiente y aleja',
   `${vAhora2.velas.toFixed(1)} velas · ${((vAhora2.to - vAhora2.from) / 3600).toFixed(0)} h`);
 
 // mirando el pasado, el zoom se hace alrededor del CENTRO de la pantalla
-await page.evaluate(() => window.__test.loadTF(window.__test.getTF(),
-  { view: { from: Date.UTC(2021, 4, 1) / 1000, to: Date.UTC(2021, 4, 20) / 1000 } }));
+await page.evaluate((v) => window.__test.loadTF(window.__test.getTF(), { view: v }),
+  { from: dias(150), to: dias(169) });
 await page.waitForTimeout(2500);
 const vPasado0 = await vista();
 await page.keyboard.press('ArrowDown');
@@ -664,8 +681,8 @@ check('sin cursor encima, la legend enseña la última vela',
 
 // 15.7 — el estado del gráfico sobrevive a la recarga (F4-1.3)
 await irTF('30m');
-await page.evaluate(() => window.__test.loadTF(window.__test.getTF(),
-  { view: { from: Date.UTC(2024, 5, 1) / 1000, to: Date.UTC(2024, 5, 6) / 1000 } }));
+await page.evaluate((v) => window.__test.loadTF(window.__test.getTF(), { view: v }),
+  { from: dias(200), to: dias(205) });
 await page.waitForTimeout(2500);
 const vAntesRecarga = await vista();
 await page.reload();
@@ -678,12 +695,6 @@ check('y a la misma posición', mismoRango(vAntesRecarga, vTrasRecarga, '30m', '
   `${iso(vAntesRecarga.from)}…${iso(vAntesRecarga.to)} → ${iso(vTrasRecarga.from)}…${iso(vTrasRecarga.to)}`);
 await page.evaluate(() => localStorage.removeItem(window.__test.VIEW_KEY));
 
-// limpieza: fuera los dibujos de prueba, vuelven los del usuario
-await page.evaluate(() => {
-  window.__test.engine.setOcultos(false);
-  localStorage.removeItem('btcdash.dibujosOcultos');
-});
 await browser.close();
-await restaurar();
 console.log(fails.length ? `\nFALLOS: ${fails.join(', ')}` : '\nTODO OK');
 process.exit(fails.length ? 1 : 0);

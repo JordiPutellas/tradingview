@@ -26,6 +26,7 @@ import (
 	"jputellas.dev/btcdash/collector/internal/collect"
 	"jputellas.dev/btcdash/collector/internal/config"
 	"jputellas.dev/btcdash/collector/internal/health"
+	"jputellas.dev/btcdash/collector/internal/seed"
 	"jputellas.dev/btcdash/collector/internal/store"
 )
 
@@ -144,6 +145,40 @@ func dispatch(cmd string, args []string) error {
 			views = strings.Split(*only, ",")
 		}
 		return backfill.RefreshCAggs(ctx, pg, from, to, views)
+	case "seed-test":
+		// Base de datos de TEST: histórico sintético reproducible (F5).
+		// El guard va ANTES de tocar nada y aborta si la URL no acaba en
+		// _test; en producción este comando no puede hacer daño.
+		fs := flag.NewFlagSet("seed-test", flag.ExitOnError)
+		days := fs.Int("days", 400, "días de velas de 1m")
+		hours1s := fs.Int("hours-1s", 6, "horas finales con velas de 1s")
+		live := fs.Bool("live", false, "no genera: emite una vela de 1s por segundo, como el colector")
+		fs.Parse(args)
+		if err := seed.Guard(cfg.DatabaseURL); err != nil {
+			return err
+		}
+		if *live {
+			slog.Info("feeder de test en marcha", "symbol", cfg.Symbol)
+			return seed.Live(ctx, pg, cfg.Symbol)
+		}
+		// Borra y rehace: la base de datos de test no guarda nada que valga.
+		if err := seed.Reset(ctx, pg); err != nil {
+			return err
+		}
+		if err := store.Migrate(ctx, pg.Pool); err != nil {
+			return err
+		}
+		if err := seed.Run(ctx, pg, seed.Opts{Symbol: cfg.Symbol, Days: *days, Hours1s: *hours1s}); err != nil {
+			return err
+		}
+		cov, err := api.Coverage(ctx, pg.Pool, cfg.Symbol)
+		if err != nil {
+			return err
+		}
+		for _, c := range cov {
+			fmt.Printf("%-4s %-11s %s → %s\n", c.TF, c.Src, tstamp(c.First), tstamp(c.Last))
+		}
+		return nil
 	case "coverage":
 		cov, err := api.Coverage(ctx, pg.Pool, cfg.Symbol)
 		if err != nil {

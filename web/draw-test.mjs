@@ -3,7 +3,7 @@
 // mira el efecto — el modelo movido, el rango del gráfico intacto y los
 // píxeles pintados en el canvas.
 //
-// Uso: node draw-test.mjs   (API en 127.0.0.1:8090 sirviendo web/dist)
+// Uso: ./run-tests.sh desde la raíz (levanta la BD de test, la siembra y la API)
 import { chromium } from 'playwright';
 import { existsSync } from 'node:fs';
 
@@ -28,29 +28,34 @@ const check = (name, ok, extra = '') => {
 };
 const wait = (ms) => page.waitForTimeout(ms);
 
-// La base de datos es la MISMA que usa el usuario (el API local va por el túnel
-// contra jordios): esta suite borra la tabla de dibujos para trabajar en
-// limpio, así que primero se guarda lo que haya y al terminar se repone. Un
-// PUT con el mismo id es upsert, o sea que la restauración es exacta salvo el
-// updated_at. Se repone también si la suite se cae a media ejecución.
-const API = 'http://127.0.0.1:8090';
-const previos = await (await fetch(`${API}/api/drawings`)).json();
-if (previos.length) console.log(`(guardados ${previos.length} dibujos del usuario para reponerlos al final)`);
-async function restaurar() {
-  for (const d of await (await fetch(`${API}/api/drawings`)).json()) {
-    await fetch(`${API}/api/drawings/${d.id}`, { method: 'DELETE' });
-  }
-  for (const d of previos) {
-    await fetch(`${API}/api/drawings/${d.id}`, { method: 'PUT',
-      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d.payload) });
-  }
-  if (previos.length) console.log(`(repuestos ${previos.length} dibujos del usuario)`);
-}
-for (const ev of ['uncaughtException', 'unhandledRejection']) {
-  process.on(ev, async (e) => { console.error(e); await restaurar(); process.exit(1); });
+// ---------------------------------------------------------------------------
+// Esta suite BORRA dibujos y trabaja a lo bruto: solo puede correr contra la
+// base de datos de TEST. La API publica su nombre en /api/health y aquí se
+// comprueba antes de tocar nada. En F4 esto no existía, las suites corrían
+// contra producción y se llevaron por delante los dibujos del usuario.
+//
+// Se levanta todo con ./run-tests.sh desde la raíz del repo.
+const API = process.env.API_BASE || 'http://127.0.0.1:8090';
+const salud = await fetch(`${API}/api/health`).then(r => r.json()).catch(() => ({}));
+if (!/_test$/.test(salud.db || '')) {
+  console.error(`ABORTADO: la API sirve la base de datos "${salud.db || '?'}", que no es de test.`);
+  console.error('Arranca el entorno con ./run-tests.sh (raíz del repo).');
+  process.exit(2);
 }
 
-await page.goto('http://127.0.0.1:8090/');
+// Ventana de la semilla: los tests de navegación se mueven DENTRO de ella, no
+// sobre años fijos. La semilla es sintética y su ventana va con el reloj.
+const DIA = 86400;
+const dias1D = await (await fetch(`${API}/api/candles?tf=1D&from=0&limit=1`)).json();
+if (!dias1D.length) {
+  console.error('ABORTADO: la base de datos de test está vacía.');
+  console.error('Siembra con: docker compose --profile test run --rm seed-test');
+  process.exit(2);
+}
+const primerDia = dias1D[0][0];
+const dias = (n) => primerDia + n * DIA;
+
+await page.goto(API + '/');
 await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
 await wait(600);
 
@@ -1113,6 +1118,5 @@ await limpiar();
 
 // --------------------------------------------------- 9. limpieza final
 await browser.close();
-await restaurar();
 console.log(fails.length ? `\nFALLOS: ${fails.join(', ')}` : '\nTODO OK');
 process.exit(fails.length ? 1 : 0);

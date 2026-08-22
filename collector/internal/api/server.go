@@ -64,7 +64,12 @@ func cacheHeaders(h http.Handler) http.Handler {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"status": "ok", "symbol": s.Symbol})
+	// El nombre de la base de datos se publica a propósito: las suites de
+	// frontend lo miran y se NIEGAN a correr si no acaba en _test (F5). Es la
+	// diferencia entre un test y borrarle los dibujos al usuario.
+	var db string
+	_ = s.Pool.QueryRow(r.Context(), "SELECT current_database()").Scan(&db)
+	writeJSON(w, map[string]any{"status": "ok", "symbol": s.Symbol, "db": db})
 }
 
 func (s *Server) handleTimeframes(w http.ResponseWriter, r *http.Request) {
