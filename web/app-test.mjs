@@ -470,6 +470,45 @@ await page.evaluate(() => {
   fetch('/api/drawings/zz-foco', { method: 'DELETE' });
 });
 
+// 15.8 — legend OHLC (F4-3.2): lo que dice tiene que ser la vela de debajo
+await irTF('1m');
+await page.keyboard.press('End');
+await page.waitForTimeout(1500);
+await page.mouse.move(700, 400);
+await page.waitForTimeout(500);
+const leg = await page.evaluate(() => {
+  const ts = window.__test.chart.timeScale();
+  const r = window.__test.engine.paneRect();
+  // La vela de debajo según LWC (coordinateToLogical redondea a la más
+  // cercana, que es justo a la que engancha el crosshair).
+  const i = ts.coordinateToLogical(700 - r.left);
+  const b = window.__test.getBars()[i];
+  const txt = document.getElementById('legend').textContent;
+  const span = document.querySelector('#legend .var');
+  const num = (s) => parseFloat(s.replace(/\./g, '').replace(',', '.'));
+  const m = txt.match(/O ([\d.,]+)\s+H ([\d.,]+)\s+L ([\d.,]+)\s+C ([\d.,]+)/);
+  return { bar: b, leidos: m && m.slice(1).map(num), txt, color: span && getComputedStyle(span).color,
+    prevClose: window.__test.getBars()[i - 1] && window.__test.getBars()[i - 1][4] };
+});
+check('la legend muestra el OHLC de la vela que hay bajo el cursor',
+  leg.leidos && Math.abs(leg.leidos[0] - leg.bar[1]) < 0.011 && Math.abs(leg.leidos[1] - leg.bar[2]) < 0.011
+  && Math.abs(leg.leidos[2] - leg.bar[3]) < 0.011 && Math.abs(leg.leidos[3] - leg.bar[4]) < 0.011,
+  `${leg.txt} · vela [${leg.bar.slice(1, 5).join(', ')}]`);
+const subeVela = leg.bar[4] >= leg.prevClose;
+check('y la variación va con la paleta del usuario, no en verde/rojo',
+  leg.color === (subeVela ? 'rgb(112, 146, 190)' : 'rgb(218, 218, 218)'),
+  `${leg.color} (${subeVela ? 'sube' : 'baja'})`);
+await page.mouse.move(20, 780);   // fuera del gráfico
+await page.waitForTimeout(600);
+const legFuera = await page.evaluate(() => {
+  const b = window.__test.getBars().at(-1);
+  const num = (s) => parseFloat(s.replace(/\./g, '').replace(',', '.'));
+  const m = document.getElementById('legend').textContent.match(/C ([\d.,]+)/);
+  return { cierre: b[4], leido: m && num(m[1]) };
+});
+check('sin cursor encima, la legend enseña la última vela',
+  Math.abs(legFuera.leido - legFuera.cierre) < 0.011, `${legFuera.leido} vs ${legFuera.cierre}`);
+
 // 15.7 — el estado del gráfico sobrevive a la recarga (F4-1.3)
 await irTF('30m');
 await page.evaluate(() => window.__test.loadTF(window.__test.getTF(),

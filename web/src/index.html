@@ -25,10 +25,17 @@
   .tfs button:hover, .tools button:hover { background:#404040; }
   .tfs button.active { color:var(--accent); border-color:var(--border); background:#404040; }
   #status { font-size:11px; color:var(--muted); flex:none; margin-left:4px; }
-  #chart { flex:1; min-height:0; }
+  /* El gráfico va dentro de un contenedor posicionado para poder colgarle
+     encima la legend sin meter hijos en el div que gestiona LWC. */
+  #chartWrap { position:relative; flex:1; min-height:0; }
+  #chart { position:absolute; inset:0; }
+  #legend { position:absolute; left:10px; top:6px; z-index:20; pointer-events:none;
+            font:12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--muted);
+            text-shadow:0 1px 2px rgba(0,0,0,.55); white-space:nowrap; }
+  #legend b { font-weight:600; color:var(--fg); }
   /* Barra de dibujo flotante y arrastrable (posición persistida). Puede
      superponerse a la cabecera: z-index por encima. */
-  .tools { position:fixed; left:8px; top:44px; z-index:30; display:flex; align-items:center; gap:2px;
+  .tools { position:fixed; left:8px; top:70px; z-index:30; display:flex; align-items:center; gap:2px;
            background:var(--panel); border:1px solid var(--border); border-radius:6px; padding:3px 4px;
            box-shadow:0 6px 18px rgba(0,0,0,.45); }
   .tools button.active { color:var(--accent); background:#404040; border-color:var(--border); }
@@ -63,7 +70,10 @@
   <div class="tfs" id="tfs"></div>
   <span id="status">conectando…</span>
 </header>
-<div id="chart"></div>
+<div id="chartWrap">
+  <div id="chart"></div>
+  <div id="legend"></div>
+</div>
 <div class="tools" id="tools">
   <span class="grip" id="toolsGrip" title="Arrastra para mover la barra">⣿</span>
   <button data-tool="hline" title="Línea horizontal (extendida)">─</button>

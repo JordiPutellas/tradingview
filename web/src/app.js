@@ -7,6 +7,7 @@ import { createChart, CandlestickSeries } from 'lightweight-charts';
 import { DrawEngine } from './draw/engine.js';
 import { mountPanel } from './draw/panel.js';
 import { logicalOf as aLogico, timeOfLogical as aTiempo } from './timemap.js';
+import { mountLegend } from './legend.js';
 
 const $ = (sel) => document.querySelector(sel);
 const statusEl = $('#status');
@@ -205,8 +206,12 @@ async function fetchCandles(params, señal) {
   return r.json();
 }
 
+// La legend se monta más abajo (necesita `bars`), pero render() ya la busca:
+// declarada aquí para no depender del orden de evaluación.
+let legend = null;
 function render() {
   series.setData(bars.map(toCandle));
+  if (legend) legend.refresh();
 }
 
 // Rango visible en TIEMPO absoluto (no en índices): es lo único que sobrevive
@@ -437,6 +442,7 @@ async function onTick(m) {
   if (last && last[0] === cur.t) bars[bars.length - 1] = bar; else bars.push(bar);
   series.update(toCandle(bar));
   statusEl.textContent = estadoTexto(m.c.toFixed(1));
+  legend.refresh();
 }
 
 function connectWS() {
@@ -471,6 +477,11 @@ const engine = new DrawEngine({
   },
 });
 mountPanel(engine, $('#drawPanel'));
+
+// ---------- legend OHLC (F4-3.2) ----------
+legend = mountLegend({
+  chart, series, el: $('#legend'), getBars: () => bars, up: UP, down: DOWN,
+});
 
 async function loadDrawings() {
   const rows = await fetch('/api/drawings').then(r => r.json()).catch(() => []);
