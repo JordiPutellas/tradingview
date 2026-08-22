@@ -396,8 +396,15 @@ const cotejo = await page.evaluate((t) => {
   let cerca = bars[0];
   for (const b of bars) if (Math.abs(b[0] - t) < Math.abs(cerca[0] - t)) cerca = b;
   const segunLWC = chart.timeScale().timeToCoordinate(cerca[0]);
-  const ancho = chart.timeScale().width() / Math.max(1, bars.length);
-  return { pintado, segunLWC, tolerancia: Math.max(4, ancho * 2), t, tBarra: cerca[0] };
+  // La referencia está CUANTIZADA a la vela más cercana, así que la
+  // tolerancia es el ancho de vela EN PANTALLA (no el medio del histórico
+  // cargado: con pocas velas a la vista una sola ocupa decenas de píxeles).
+  // Si el mapeo tiempo→x estuviera roto el error sería de cientos de píxeles
+  // — el fallo de la trampa 14 pintaba en x=0.
+  const ts = chart.timeScale();
+  const i = ts.coordinateToLogical(pintado ?? 0);
+  const espaciado = Math.abs((ts.logicalToCoordinate(i + 1) ?? 0) - (ts.logicalToCoordinate(i) ?? 0));
+  return { pintado, segunLWC, tolerancia: Math.max(4, espaciado), t, tBarra: cerca[0] };
 }, antesTF.pts[0].t);
 check('tras cambiar de timeframe el dibujo se pinta donde toca',
   cotejo.pintado !== null && cotejo.segunLWC !== null

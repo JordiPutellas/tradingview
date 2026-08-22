@@ -71,9 +71,19 @@ await page.waitForTimeout(3000);
 const after = await page.evaluate(() => window.__test.getBars().length);
 check('lazy-loading histórico', after > before, `${before} → ${after} velas`);
 
-// 6. streaming en vivo (1h en curso se actualiza)
+// 6. streaming en vivo (la vela en curso se actualiza)
+// El test 5 dejó la vista en el pasado y con F4-1.1 el cambio de timeframe la
+// conserva: hay que volver al presente, que es justo lo que hace End.
 await page.click('button[data-tf="1s"]');
 await page.waitForFunction(() => window.__test.getTF().name === '1s' && window.__test.getBars().length > 100, { timeout: 20000 });
+check('con la ventana en el pasado el frontend lo sabe',
+  (await page.evaluate(() => window.__test.isLive())) === false);
+await page.keyboard.press('End');
+await page.waitForFunction(() => window.__test.isLive() === true, { timeout: 20000 });
+await page.waitForTimeout(1200);
+check('End vuelve al presente',
+  (await page.evaluate(() => Date.now() / 1000 - window.__test.getBars().at(-1)[0])) < 10,
+  `${(await page.evaluate(() => Date.now() / 1000 - window.__test.getBars().at(-1)[0])).toFixed(1)}s de antigüedad`);
 const lastT0 = await page.evaluate(() => window.__test.getBars().at(-1)[0]);
 await page.waitForTimeout(4000);
 const { lastT1, fresh } = await page.evaluate(() => {
@@ -189,13 +199,15 @@ const want1 = await page.evaluate(() => 1 + window.__test.CONFIG.wheelZoom);
 check('una muesca escala el rango visible según CONFIG', Math.abs(r1 - want1) < 0.02,
   `ratio=${r1.toFixed(3)} esperado=${want1}`);
 // cambiar el ajuste debe cambiar el efecto (si LWC siguiera mandando, no lo haría)
-await page.evaluate(() => localStorage.setItem('cfg.wheelZoom', '0.6'));
+// La vista guardada (F4-1.3) se limpia: esta comprobación mide la rueda desde
+// el estado por defecto (1m, presente), no desde donde quedó el test anterior.
+await page.evaluate(() => { localStorage.setItem('cfg.wheelZoom', '0.6'); localStorage.removeItem('btcdash.view'); });
 await page.reload();
 await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
 const r2 = await wheelRatio();
 check('cfg.wheelZoom se lee al arrancar y manda sobre LWC', Math.abs(r2 - 1.6) < 0.02,
   `ratio=${r2.toFixed(3)} esperado=1.6`);
-await page.evaluate(() => localStorage.removeItem('cfg.wheelZoom'));
+await page.evaluate(() => { localStorage.removeItem('cfg.wheelZoom'); localStorage.removeItem('btcdash.view'); });
 await page.reload();
 await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
 
@@ -221,16 +233,18 @@ check('el contrazoom máximo deja velas en pantalla',
 async function autoscaleProbe() {
   await page.click('button[data-tf="1D"]');
   await page.waitForFunction(() => window.__test.getTF().name === '1D' && window.__test.getBars().length > 100, { timeout: 20000 });
-  const far = await page.evaluate(() => {
-    const { getBars, engine, chart } = window.__test;
+  // Irse a 2019 (el precio es una fracción del actual) y dibujar una
+  // horizontal al precio de HOY: si el autoajuste mirara los dibujos, la
+  // escala tendría que estirarse hasta los 77k.
+  const far = await page.evaluate(async () => {
+    const { getBars, engine, loadTF, getTF } = window.__test;
+    const price = getBars().at(-1)[4];
+    await loadTF(getTF(), { view: { from: Date.UTC(2019, 10, 1) / 1000, to: Date.UTC(2020, 0, 1) / 1000 } });
     const bars = getBars();
-    const price = bars.at(-1)[4];
     engine.addShape('hline', [{ t: bars.at(-1)[0], p: price }], { id: 'zz-autoscale-test' });
-    // irse al principio del histórico: allí el precio es una fracción del actual
-    chart.timeScale().setVisibleLogicalRange({ from: 0, to: 120 });
     return price;
   });
-  await page.waitForTimeout(600);
+  await page.waitForTimeout(1500);
   const box = await page.locator('#chart').boundingBox();
   await page.mouse.dblclick(box.x + box.width - 35, box.y + box.height / 2); // escala de precio → AUTO
   await page.waitForTimeout(600);
@@ -253,13 +267,13 @@ check('el autoajuste ignora los dibujos (gesto real)', as.top < as.far * 0.5,
 
 // 12b. control: con drawingsAutoscale=1 el dibujo SÍ debe estirar la escala.
 // Sin esto, 12 pasaría igual aunque el arreglo no hiciera nada.
-await page.evaluate(() => localStorage.setItem('cfg.drawingsAutoscale', '1'));
+await page.evaluate(() => { localStorage.setItem('cfg.drawingsAutoscale', '1'); localStorage.removeItem('btcdash.view'); });
 await page.reload();
 await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
 const ctrl = await autoscaleProbe();
 check('control: con la opción activada el dibujo sí estira la escala', ctrl.top >= ctrl.far,
   `dibujo en ${ctrl.far.toFixed(0)}, vista tras AUTO ${ctrl.bottom.toFixed(0)}–${ctrl.top.toFixed(0)}`);
-await page.evaluate(() => localStorage.removeItem('cfg.drawingsAutoscale'));
+await page.evaluate(() => { localStorage.removeItem('cfg.drawingsAutoscale'); localStorage.removeItem('btcdash.view'); });
 await page.reload();
 await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
 
@@ -303,6 +317,174 @@ const kept = await page.evaluate(() => ({
 check('posición de la barra persiste entre sesiones',
   kept.left === moved.left && kept.top === moved.top, `${JSON.stringify(moved)} → ${JSON.stringify(kept)}`);
 await page.evaluate(() => localStorage.removeItem('btcdash.toolbarPos'));
+
+
+// ============================================================ F4 · navegación
+// Regla de F2a/F3: efecto, no intención. Aquí el rango visible se lee con
+// getVisibleRange() de LWC — su propio mapeo índice→tiempo, camino distinto
+// del que usa el frontend para restaurarlo. Si la conversión estuviera rota,
+// las dos no cuadrarían.
+const iso = (t) => new Date(t * 1000).toISOString().slice(0, 16);
+const vista = () => page.evaluate(() => {
+  const ts = window.__test.chart.timeScale();
+  const r = ts.getVisibleRange(), l = ts.getVisibleLogicalRange();
+  return r && l ? { from: r.from, to: r.to, velas: l.to - l.from } : null;
+});
+const irTF = async (name) => {
+  await page.click(`button[data-tf="${name}"]`);
+  await page.waitForFunction((n) => window.__test.getTF().name === n && window.__test.getBars().length > 0,
+    name, { timeout: 30000 });
+  await page.waitForTimeout(1300);
+};
+const segs = (name) => TFSEG[name];
+const TFSEG = { '1s':1,'5s':5,'10s':10,'15s':15,'30s':30,'45s':45,'1m':60,'3m':180,'5m':300,
+  '15m':900,'30m':1800,'45m':2700,'1h':3600,'2h':7200,'3h':10800,'4h':14400,'6h':21600,
+  '8h':28800,'12h':43200,'1D':86400,'3D':259200,'5D':432000,'1W':604800,'2W':1209600,
+  '1M':2592000,'3M':7776000,'6M':15552000,'12M':31536000 };
+const mismoRango = (a, b, tfA, tfB) => {
+  const tol = segs(tfA) + segs(tfB);
+  return Math.abs(a.from - b.from) <= tol && Math.abs(a.to - b.to) <= tol;
+};
+
+// 15.1 — cerca del presente: 1h → 5m conserva el tramo (RF-5.17)
+await irTF('1h');
+await page.evaluate(() => {
+  const b = window.__test.getBars();
+  const ts = window.__test.chart.timeScale();
+  ts.setVisibleRange({ from: b[b.length - 120][0], to: b[b.length - 1][0] });  // API de LWC
+});
+await page.waitForTimeout(900);
+const v1h = await vista();
+await irTF('5m');
+const v5m = await vista();
+check('el rango visible sobrevive al cambio de timeframe (1h→5m)',
+  mismoRango(v1h, v5m, '1h', '5m'), `${iso(v1h.from)}…${iso(v1h.to)} → ${iso(v5m.from)}…${iso(v5m.to)}`);
+check('y el destino trae las velas que tocan', v5m.velas > 1000 && v5m.velas < 1600,
+  `${Math.round(v5m.velas)} velas de 5m para ${Math.round(v1h.velas)} de 1h`);
+
+// 15.2 — histórico profundo (2020), no solo cerca del presente
+await irTF('1D');
+await page.evaluate(() => window.__test.loadTF(window.__test.getTF(),
+  { view: { from: Date.UTC(2020, 2, 1) / 1000, to: Date.UTC(2020, 3, 1) / 1000 } }));
+await page.waitForTimeout(2500);
+const v2020 = await vista();
+check('se puede saltar a un tramo del histórico profundo',
+  Math.abs(v2020.from - Date.UTC(2020, 2, 1) / 1000) < 2 * 86400, iso(v2020.from));
+await irTF('1h');
+const v2020h = await vista();
+check('el rango se conserva también en 2020 (1D→1h)',
+  mismoRango(v2020, v2020h, '1D', '1h'), `${iso(v2020.from)}…${iso(v2020.to)} → ${iso(v2020h.from)}…${iso(v2020h.to)}`);
+check('y con la ventana en el pasado el streaming no toca las velas',
+  (await page.evaluate(() => window.__test.isLive())) === false);
+
+// 15.3 — tope de velas: 1D sobre un año → 1m centra en el mismo instante
+await irTF('1D');
+await page.evaluate(() => window.__test.loadTF(window.__test.getTF(),
+  { view: { from: Date.UTC(2025, 0, 1) / 1000, to: Date.UTC(2026, 0, 1) / 1000 } }));
+await page.waitForTimeout(2500);
+const vAnio = await vista();
+await irTF('1m');
+const vMin = await vista();
+const cap = await page.evaluate(() => window.__test.CONFIG.tfChangeMaxBars);
+const centro = (r) => (r.from + r.to) / 2;
+check('sobre el tope, el cambio de timeframe centra en el mismo instante',
+  Math.abs(centro(vMin) - centro(vAnio)) < 2 * 86400,
+  `centro ${iso(centro(vAnio))} → ${iso(centro(vMin))}`);
+check('y muestra como mucho el tope de velas', vMin.velas <= cap * 1.02 && vMin.velas > cap * 0.9,
+  `${Math.round(vMin.velas)} velas (tope ${cap})`);
+check('el aviso del tope se ve en la barra de estado',
+  (await page.evaluate(() => document.getElementById('status').textContent)).includes('tope'),
+  await page.evaluate(() => document.getElementById('status').textContent));
+
+// 15.4 — suelo de velas: de 1s a 1h no puede quedar una vela sola
+await irTF('1s');
+await irTF('1h');
+const vSuelo = await vista();
+check('bajo el suelo, el cambio ensancha en vez de dejar una vela',
+  vSuelo.velas >= 18, `${Math.round(vSuelo.velas)} velas`);
+
+// 15.5 — velas nuevas por la derecha con la ventana en el pasado
+await irTF('1h');
+await page.evaluate(() => window.__test.loadTF(window.__test.getTF(),
+  { view: { from: Date.UTC(2021, 4, 1) / 1000, to: Date.UTC(2021, 4, 10) / 1000 } }));
+await page.waitForTimeout(2500);
+const antesRueda = await vista();
+const nAntes = await page.evaluate(() => window.__test.getBars().length);
+await page.mouse.move(700, 400);
+for (let i = 0; i < 60; i++) await page.mouse.wheel(600, 0);   // desplazar al futuro
+await page.waitForTimeout(4000);
+const trasRueda = await vista();
+const nTras = await page.evaluate(() => window.__test.getBars().length);
+const pxRueda = await page.evaluate(`(${readPixels.toString()})()`);
+check('desplazarse hacia el presente carga velas nuevas por la derecha',
+  nTras > nAntes && trasRueda.from > antesRueda.from,
+  `${nAntes} → ${nTras} velas · ${iso(antesRueda.from)} → ${iso(trasRueda.from)}`);
+check('y no deja la pantalla vacía', pxRueda.up + pxRueda.down > 1000,
+  `${pxRueda.up + pxRueda.down} px de vela`);
+
+// 15.6 — flechas del teclado (F4-1.2)
+await irTF('5m');
+const vFlecha0 = await vista();
+await page.keyboard.press('ArrowUp');
+await page.waitForFunction(() => window.__test.getTF().name === '15m', { timeout: 20000 });
+await page.waitForTimeout(1200);
+const vFlecha1 = await vista();
+check('flecha arriba sube al timeframe siguiente', true, '5m → 15m');
+check('y conserva la posición', mismoRango(vFlecha0, vFlecha1, '5m', '15m'),
+  `${iso(vFlecha0.from)}…${iso(vFlecha0.to)} → ${iso(vFlecha1.from)}…${iso(vFlecha1.to)}`);
+await page.keyboard.press('ArrowDown');
+await page.waitForFunction(() => window.__test.getTF().name === '5m', { timeout: 20000 });
+await page.waitForTimeout(1000);
+check('flecha abajo baja al anterior',
+  (await page.evaluate(() => window.__test.getTF().name)) === '5m');
+await irTF('1s');
+await page.keyboard.press('ArrowDown');
+await page.waitForTimeout(1200);
+check('en el extremo inferior la flecha no hace nada',
+  (await page.evaluate(() => window.__test.getTF().name)) === '1s');
+await irTF('12M');
+await page.keyboard.press('ArrowUp');
+await page.waitForTimeout(1200);
+check('en el extremo superior tampoco',
+  (await page.evaluate(() => window.__test.getTF().name)) === '12M');
+
+// 15.6b — con el foco en un control, las flechas son del control
+await irTF('1h');
+await page.evaluate(() => {
+  const { engine, getBars } = window.__test;
+  const b = getBars();
+  engine.addShape('hline', [{ t: b[b.length - 30][0], p: b[b.length - 1][4] }], { id: 'zz-foco' });
+  engine.select('zz-foco');
+});
+await page.waitForTimeout(400);
+await page.focus('#drawPanel [data-k="opacity"]');
+const op0 = await page.evaluate(() => document.querySelector('#drawPanel [data-k="opacity"]').value);
+await page.keyboard.press('ArrowDown');
+await page.waitForTimeout(600);
+const op1 = await page.evaluate(() => document.querySelector('#drawPanel [data-k="opacity"]').value);
+check('con el foco en un deslizador, la flecha lo mueve a él y no al timeframe',
+  op1 !== op0 && (await page.evaluate(() => window.__test.getTF().name)) === '1h',
+  `opacidad ${op0} → ${op1}`);
+await page.evaluate(() => {
+  window.__test.engine.remove('zz-foco');
+  fetch('/api/drawings/zz-foco', { method: 'DELETE' });
+});
+
+// 15.7 — el estado del gráfico sobrevive a la recarga (F4-1.3)
+await irTF('30m');
+await page.evaluate(() => window.__test.loadTF(window.__test.getTF(),
+  { view: { from: Date.UTC(2024, 5, 1) / 1000, to: Date.UTC(2024, 5, 6) / 1000 } }));
+await page.waitForTimeout(2500);
+const vAntesRecarga = await vista();
+await page.reload();
+await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
+await page.waitForTimeout(2000);
+const vTrasRecarga = await vista();
+check('la recarga vuelve al mismo timeframe',
+  (await page.evaluate(() => window.__test.getTF().name)) === '30m');
+check('y a la misma posición', mismoRango(vAntesRecarga, vTrasRecarga, '30m', '30m'),
+  `${iso(vAntesRecarga.from)}…${iso(vAntesRecarga.to)} → ${iso(vTrasRecarga.from)}…${iso(vTrasRecarga.to)}`);
+await page.evaluate(() => localStorage.removeItem(window.__test.VIEW_KEY));
 
 // limpieza: borra los dibujos de prueba de la BD
 for (const d of await (await fetch('http://127.0.0.1:8090/api/drawings')).json()) {

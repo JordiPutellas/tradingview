@@ -11,6 +11,7 @@
 // del rango de datos para poder dibujar a la derecha de la última vela.
 import { TYPES, DEFAULT_STYLE, drawHandles, drawSelection } from './shapes.js';
 import { HANDLE, dist, rgba, fmtDuration, fmtPrice } from './geom.js';
+import { logicalOf as aLogico, timeOfLogical as aTiempo } from '../timemap.js';
 
 const PERSIST_MS = 400;
 const uuid = () => crypto.randomUUID();
@@ -47,32 +48,8 @@ export class DrawEngine {
   // Se pasa por el índice lógico porque timeToCoordinate solo resuelve
   // tiempos que existen en los datos: con esto un dibujo puede vivir entre
   // dos velas o a la derecha de la última.
-  logicalOf(time) {
-    const b = this.getBars();
-    const n = b.length;
-    if (!n) return null;
-    const step = this.getStep();
-    if (time <= b[0][0]) return -((b[0][0] - time) / step);
-    if (time >= b[n - 1][0]) return (n - 1) + (time - b[n - 1][0]) / step;
-    let lo = 0, hi = n - 1;
-    while (hi - lo > 1) {
-      const mid = (lo + hi) >> 1;
-      if (b[mid][0] <= time) lo = mid; else hi = mid;
-    }
-    const span = (b[hi][0] - b[lo][0]) || step;
-    return lo + (time - b[lo][0]) / span;
-  }
-
-  timeOfLogical(l) {
-    const b = this.getBars();
-    const n = b.length;
-    if (!n) return null;
-    const step = this.getStep();
-    if (l <= 0) return Math.round(b[0][0] + l * step);
-    if (l >= n - 1) return Math.round(b[n - 1][0] + (l - (n - 1)) * step);
-    const i = Math.floor(l), f = l - i;
-    return Math.round(b[i][0] + f * ((b[i + 1][0] - b[i][0]) || step));
-  }
+  logicalOf(time) { return aLogico(this.getBars(), this.getStep(), time); }
+  timeOfLogical(l) { return aTiempo(this.getBars(), this.getStep(), l); }
 
   // OJO con la API de LWC: logicalToCoordinate(l) devuelve 0 si l no es
   // entero, y coordinateToLogical(x) redondea al índice de vela más cercano.
