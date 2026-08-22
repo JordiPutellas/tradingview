@@ -73,6 +73,74 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
 
+  # ---------------------------------------------------------------- BACKUP
+  # Copia por capas (F5, bloque 2). No arranca sola: la llama el cron con
+  #   docker compose --profile ops run --rm backup -capas estado
+  # El directorio ./backups está EXCLUIDO del rsync de deploy.sh: un despliegue
+  # no puede llevarse por delante las copias.
+  backup:
+    profiles: ["ops"]
+    build: .
+    entrypoint: ["collector", "backup"]
+    # Escribe en ./backups del HOST: tiene que hacerlo con el uid del usuario
+    # del servidor, no con el 10001 de la imagen, o el bind mount le da
+    # "permission denied" y no hay copia.
+    user: "1000:1000"
+    mem_limit: 256m
+    environment:
+      DATABASE_URL: postgres://btc:${POSTGRES_PASSWORD:-btc}@timescaledb:5432/btc
+      SYMBOL: BTCUSDT
+      # Destino fuera del servidor. Sin estas cuatro, la copia se queda en el
+      # mismo disco que la base de datos y el comando lo avisa (ver RUNBOOK).
+      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:-}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+      BACKUP_S3_ACCESS_KEY: ${BACKUP_S3_ACCESS_KEY:-}
+      BACKUP_S3_SECRET_KEY: ${BACKUP_S3_SECRET_KEY:-}
+      BACKUP_S3_PREFIX: ${BACKUP_S3_PREFIX:-btcdash}
+      BACKUP_S3_REGION: ${BACKUP_S3_REGION:-auto}
+      BACKUP_HEALTHCHECK_URL: ${BACKUP_HEALTHCHECK_URL:-}
+    volumes:
+      - ./backups:/backups
+
+  # Restauración de prueba: una base de datos aparte donde volcar la copia y
+  # comprobar que sirve.  docker compose --profile ops up -d timescaledb-restore
+  timescaledb-restore:
+    profiles: ["ops"]
+    image: timescale/timescaledb:2.17.2-pg16
+    restart: "no"
+    mem_limit: 256m
+    environment:
+      POSTGRES_USER: btc
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-btc}
+      POSTGRES_DB: btc_restore_test
+      TS_TUNE_MEMORY: 160MB
+      TS_TUNE_NUM_CPUS: "1"
+    volumes:
+      - tsrestore:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5435:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U btc -d btc_restore_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # El mismo binario apuntando a la base de datos de restauración: migra y
+  # mete la copia.  docker compose --profile ops run --rm restore -dir /backups/estado/<sello>
+  restore:
+    profiles: ["ops"]
+    build: .
+    entrypoint: ["collector", "restore"]
+    mem_limit: 256m
+    depends_on:
+      timescaledb-restore:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://btc:${POSTGRES_PASSWORD:-btc}@timescaledb-restore:5432/btc_restore_test
+      SYMBOL: BTCUSDT
+    volumes:
+      - ./backups:/backups:ro
+
   # ---------------------------------------------------------------- TEST
   # Entorno de test (F5, bloque 1). NO arranca solo: hay que pedirlo con
   #   docker compose --profile test up -d timescaledb-test
@@ -139,3 +207,4 @@ services:
 volumes:
   tsdata:
   tstest:
+  tsrestore:

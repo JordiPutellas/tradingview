@@ -11,17 +11,21 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	"jputellas.dev/btcdash/collector/internal/api"
 	"jputellas.dev/btcdash/collector/internal/backfill"
+	"jputellas.dev/btcdash/collector/internal/backup"
 	"jputellas.dev/btcdash/collector/internal/binance"
 	"jputellas.dev/btcdash/collector/internal/collect"
 	"jputellas.dev/btcdash/collector/internal/config"
@@ -179,6 +183,52 @@ func dispatch(cmd string, args []string) error {
 			fmt.Printf("%-4s %-11s %s → %s\n", c.TF, c.Src, tstamp(c.First), tstamp(c.Last))
 		}
 		return nil
+	case "backup":
+		// Copia por capas (F5, bloque 2). Diseñado para correr por cron:
+		// escribe en local, sube a S3 si hay credenciales y avisa a
+		// healthchecks.io del resultado — un backup que falla en silencio no
+		// es un backup.
+		fs := flag.NewFlagSet("backup", flag.ExitOnError)
+		dir := fs.String("dir", "/backups", "directorio de destino")
+		capas := fs.String("capas", "estado", "capas: estado,1m,1s (coma)")
+		keepEstado := fs.Int("keep-estado", 30, "días de copias de estado")
+		keep1m := fs.Int("keep-1m", 90, "días de copias de candles_1m")
+		keep1s := fs.Int("keep-1s", 400, "días de días de candles_1s")
+		fs.Parse(args)
+		return hacerBackup(ctx, pg, cfg.Symbol, *dir, strings.Split(*capas, ","),
+			map[string]int{"estado": *keepEstado, "1m": *keep1m, "1s": *keep1s})
+	case "restore":
+		// Restauración. Contra una base de datos que no sea de test hay que
+		// decirlo a propósito con -force: restaurar encima de producción por
+		// error es peor que no tener backup.
+		fs := flag.NewFlagSet("restore", flag.ExitOnError)
+		dir := fs.String("dir", "", "directorio de una copia de estado (o fichero .csv.gz suelto)")
+		tabla := fs.String("tabla", "", "tabla destino si -dir es un fichero suelto")
+		force := fs.Bool("force", false, "permitir restaurar sobre una base de datos que no sea de test")
+		fs.Parse(args)
+		if *dir == "" {
+			return fmt.Errorf("-dir es obligatorio")
+		}
+		if err := seed.Guard(cfg.DatabaseURL); err != nil && !*force {
+			return fmt.Errorf("%w (usa -force si de verdad quieres restaurar aquí)", err)
+		}
+		// El esquema se recrea con las migraciones, que están en git: el
+		// backup no lleva DDL a propósito (ver internal/backup).
+		if err := store.Migrate(ctx, pg.Pool); err != nil {
+			return err
+		}
+		return restaurar(ctx, pg, *dir, *tabla)
+	case "verify-restore":
+		// "Un backup sin restauración verificada no es un backup": compara lo
+		// que hay en ESTA base de datos contra el manifiesto de la copia.
+		fs := flag.NewFlagSet("verify-restore", flag.ExitOnError)
+		man := fs.String("manifiesto", "", "fichero manifiesto-*.json de la copia")
+		tablas := fs.String("tablas", strings.Join(backup.TablasEstado, ","), "tablas a comprobar")
+		fs.Parse(args)
+		if *man == "" {
+			return fmt.Errorf("-manifiesto es obligatorio")
+		}
+		return verificarRestauracion(ctx, pg, *man, strings.Split(*tablas, ","))
 	case "coverage":
 		cov, err := api.Coverage(ctx, pg.Pool, cfg.Symbol)
 		if err != nil {
@@ -241,4 +291,197 @@ func run(ctx context.Context, cfg config.Config, pg *store.PG) error {
 	slog.Info("collector starting", "symbol", cfg.Symbol,
 		"reconcile_window", cfg.ReconcileWindow, "health_addr", cfg.HealthAddr)
 	return col.Run(ctx)
+}
+
+// hacerBackup ejecuta las capas pedidas, poda lo viejo, sube a S3 si hay
+// credenciales y avisa a healthchecks.io. Devuelve error si algo falla, y en
+// ese caso el ping va a /fail: el silencio no cuenta como éxito.
+func hacerBackup(ctx context.Context, pg *store.PG, symbol, dir string, capas []string, keep map[string]int) error {
+	hc := os.Getenv("BACKUP_HEALTHCHECK_URL")
+	ping(ctx, hc, "/start")
+	err := backupCapas(ctx, pg, symbol, dir, capas, keep)
+	if err != nil {
+		ping(ctx, hc, "/fail")
+		return err
+	}
+	ping(ctx, hc, "")
+	return nil
+}
+
+func backupCapas(ctx context.Context, pg *store.PG, symbol, dir string, capas []string, keep map[string]int) error {
+	sello := time.Now().UTC()
+	var fs []backup.Fichero
+	for _, c := range capas {
+		switch strings.TrimSpace(c) {
+		case "estado":
+			f, err := backup.Estado(ctx, pg, dir, sello)
+			if err != nil {
+				return err
+			}
+			fs = append(fs, f...)
+		case "1m":
+			f, err := backup.Velas1m(ctx, pg, dir, sello)
+			if err != nil {
+				return err
+			}
+			fs = append(fs, f)
+		case "1s":
+			// Anteayer: el cron de t1 corrige el día anterior a las 09:40 UTC,
+			// así que con un día de margen el fichero sale ya exacto y no hay
+			// que volver a copiarlo nunca.
+			dia := sello.AddDate(0, 0, -2)
+			f, err := backup.Velas1sDia(ctx, pg, dir, dia)
+			if err != nil {
+				return err
+			}
+			fs = append(fs, f)
+		case "":
+		default:
+			return fmt.Errorf("capa desconocida: %q", c)
+		}
+	}
+	man, err := backup.HacerManifiesto(ctx, pg, symbol, fs)
+	if err != nil {
+		return err
+	}
+	fman, err := man.Escribir(dir, sello)
+	if err != nil {
+		return err
+	}
+	fs = append(fs, fman)
+	for _, f := range fs {
+		slog.Info("copia escrita", "clave", f.Clave, "bytes", f.Bytes)
+	}
+
+	// Poda local ANTES de subir: si el disco está justo, lo que sobra es lo
+	// viejo, no la copia recién hecha.
+	for capa, dias := range keep {
+		borrados, err := backup.Podar(dir, capa, dias, 3)
+		if err != nil {
+			return err
+		}
+		if len(borrados) > 0 {
+			slog.Info("podado local", "capa", capa, "borrados", len(borrados))
+		}
+	}
+	backup.Podar(dir, "manifiesto", keep["estado"], 3)
+
+	s3, ok := backup.S3DesdeEnv()
+	if !ok {
+		slog.Warn("sin credenciales S3: la copia se queda EN EL MISMO SERVIDOR que la base de datos " +
+			"(configura BACKUP_S3_* en .env; ver RUNBOOK)")
+		return nil
+	}
+	if err := s3.Subir(ctx, fs); err != nil {
+		return err
+	}
+	slog.Info("subido a S3", "bucket", s3.Bucket, "ficheros", len(fs))
+	for capa, dias := range keep {
+		borrados, err := s3.PodarRemoto(ctx, capa, dias, 3)
+		if err != nil {
+			return err
+		}
+		if len(borrados) > 0 {
+			slog.Info("podado remoto", "capa", capa, "borrados", len(borrados))
+		}
+	}
+	return nil
+}
+
+// restaurar mete de vuelta una copia de estado (un directorio con un csv.gz
+// por tabla) o un fichero suelto en la tabla indicada.
+func restaurar(ctx context.Context, pg *store.PG, dir, tabla string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		if tabla == "" {
+			tabla = backup.TablaDeFichero(dir)
+		}
+		n, err := backup.Restaurar(ctx, pg, tabla, dir)
+		if err != nil {
+			return err
+		}
+		slog.Info("restaurado", "tabla", tabla, "filas", n)
+		return nil
+	}
+	entradas, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entradas {
+		if !strings.HasSuffix(e.Name(), ".csv.gz") {
+			continue
+		}
+		ruta := filepath.Join(dir, e.Name())
+		t := backup.TablaDeFichero(ruta)
+		n, err := backup.Restaurar(ctx, pg, t, ruta)
+		if err != nil {
+			return err
+		}
+		slog.Info("restaurado", "tabla", t, "filas", n)
+	}
+	return nil
+}
+
+// ping avisa a healthchecks.io. Best-effort y con timeout corto: el backup no
+// se cae porque el avisador esté caído.
+func ping(ctx context.Context, base, sufijo string) {
+	if base == "" {
+		return
+	}
+	c := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+sufijo, nil)
+	if err != nil {
+		return
+	}
+	if resp, err := c.Do(req); err == nil {
+		resp.Body.Close()
+	} else {
+		slog.Warn("ping de backup fallido", "err", err)
+	}
+}
+
+// verificarRestauracion compara la base de datos actual con el manifiesto de
+// una copia. Falla si algo no cuadra: es la diferencia entre tener backups y
+// creer que se tienen.
+func verificarRestauracion(ctx context.Context, pg *store.PG, ruta string, tablas []string) error {
+	b, err := os.ReadFile(ruta)
+	if err != nil {
+		return err
+	}
+	var man backup.Manifiesto
+	if err := json.Unmarshal(b, &man); err != nil {
+		return err
+	}
+	var fallos int
+	for _, t := range tablas {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		esperado, ok := man.Tablas[t]
+		if !ok {
+			fmt.Printf("· %-20s no está en el manifiesto, se salta\n", t)
+			continue
+		}
+		var filas int64
+		if err := pg.Pool.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM %s`, t)).Scan(&filas); err != nil {
+			fmt.Printf("✗ %-20s no se puede leer: %v\n", t, err)
+			fallos++
+			continue
+		}
+		if filas != esperado.Filas {
+			fmt.Printf("✗ %-20s %d filas, el manifiesto dice %d\n", t, filas, esperado.Filas)
+			fallos++
+			continue
+		}
+		fmt.Printf("✓ %-20s %d filas\n", t, filas)
+	}
+	if fallos > 0 {
+		return fmt.Errorf("%d tabla(s) no cuadran con el manifiesto", fallos)
+	}
+	fmt.Printf("restauración verificada contra %s\n", filepath.Base(ruta))
+	return nil
 }

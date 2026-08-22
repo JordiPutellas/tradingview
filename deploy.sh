@@ -39,8 +39,10 @@ elif ! ssh "$HOST" "grep -qE '^HEALTHCHECK_URL=.+' $DEST/.env"; then
 fi
 
 # --- código ---
+# --exclude 'backups/': ahí viven las copias (F5). Sin esta línea, un deploy
+# con --delete se llevaría por delante justo lo que protege de un desastre.
 rsync -az --delete --exclude 'webdist/' --exclude 'data/' --exclude '.env' \
-  collector/ "$HOST:$DEST/"
+  --exclude 'backups/' collector/ "$HOST:$DEST/"
 
 # --- frontend ---
 if [ "$WEB" = 1 ]; then
@@ -50,7 +52,11 @@ fi
 
 # --- contenedores ---
 if [ "$BUILD" = 1 ]; then
-  ssh "$HOST" "cd $DEST && docker compose up -d --build"
+  # --profile test/ops en el build: esas imágenes (seed-test, backup, restore)
+  # NO se reconstruyen con `up -d --build`, porque `up` no arranca lo que está
+  # tras un perfil. Sin esta línea se quedan con el binario de hace tres
+  # despliegues y depurar eso cuesta una tarde.
+  ssh "$HOST" "cd $DEST && docker compose --profile test --profile ops build && docker compose up -d --build"
 else
   ssh "$HOST" "cd $DEST && docker compose up -d"
 fi
