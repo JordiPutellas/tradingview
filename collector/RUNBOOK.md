@@ -411,6 +411,12 @@ pintados en el canvas tras cada cambio del panel.
   en pantalla. El tope de la API sigue siendo 20.000 por petición: la
   diferencia se reparte como margen a los lados (mínimo 200 velas) para poder
   desplazarse un poco sin volver al servidor.
+- **Las flechas hacen lo contrario que el click, a propósito.** El click en la
+  barra conserva el tramo; las flechas conservan el **ancho de vela**, o sea el
+  número de velas a la vista, para que sirvan de zoom: bajar de temporalidad
+  acerca y subir aleja. Punto fijo: el borde derecho si se está pegado al
+  presente —se sigue viendo la última vela—, y el centro de la pantalla si se
+  está mirando el pasado.
 - Si el tramo pedido **no existe** en el timeframe de destino (2020 en 1s, que
   empieza en 2024) se cae al comportamiento de siempre —últimas velas, presente—
   avisando con `sin datos en ese tramo`.
@@ -427,7 +433,7 @@ sola letra, dentro de cualquier control de formulario):
 
 | Tecla | Efecto |
 | --- | --- |
-| ↑ / ↓ | timeframe siguiente / anterior, conservando la posición |
+| ↑ / ↓ | timeframe siguiente / anterior, conservando el ancho de vela (acerca al bajar, aleja al subir) |
 | End | volver al presente |
 | Supr | borrar el dibujo seleccionado |
 | Esc | cancelar herramienta, medición o selección |

@@ -210,6 +210,15 @@ check('sin indicador de volumen', seriesCount === 1, `${seriesCount} serie(s) en
 
 // 11. F2b — la rueda mueve lo que dice la config, y el ajuste se lee de verdad
 const wheelRatio = async () => {
+  // Ventana moderada de partida: si se mide alejando desde el tope de zoom
+  // (que es donde deja el gráfico el test anterior), el recorte de "no
+  // alejarse más allá de lo cargado" se come la muesca y el ratio no dice
+  // nada de la sensibilidad.
+  await page.evaluate(() => {
+    const n = window.__test.getBars().length;
+    window.__test.chart.timeScale().setVisibleLogicalRange({ from: n - 300, to: n });
+  });
+  await page.waitForTimeout(400);
   const before = await page.evaluate(() => window.__test.chart.timeScale().getVisibleLogicalRange());
   await page.mouse.move(700, 400);
   await page.mouse.wheel(0, 100);
@@ -445,21 +454,64 @@ check('desplazarse hacia el presente carga velas nuevas por la derecha',
 check('y no deja la pantalla vacía', pxRueda.up + pxRueda.down > 1000,
   `${pxRueda.up + pxRueda.down} px de vela`);
 
-// 15.6 — flechas del teclado (F4-1.2)
-await irTF('5m');
-const vFlecha0 = await vista();
-await page.keyboard.press('ArrowUp');
-await page.waitForFunction(() => window.__test.getTF().name === '15m', { timeout: 20000 });
-await page.waitForTimeout(1200);
-const vFlecha1 = await vista();
-check('flecha arriba sube al timeframe siguiente', true, '5m → 15m');
-check('y conserva la posición', mismoRango(vFlecha0, vFlecha1, '5m', '15m'),
-  `${iso(vFlecha0.from)}…${iso(vFlecha0.to)} → ${iso(vFlecha1.from)}…${iso(vFlecha1.to)}`);
+// 15.6 — flechas del teclado (F4-1.2): conservan el ANCHO DE VELA, no el
+// tramo. Bajar de temporalidad acerca y subir aleja, pegando el borde derecho
+// al presente si es ahí donde se está mirando.
+await irTF('1h');
+await page.keyboard.press('End');
+await page.waitForFunction(() => window.__test.isLive() === true, { timeout: 20000 });
+await page.waitForTimeout(1500);
+const vAhora0 = await vista();
 await page.keyboard.press('ArrowDown');
-await page.waitForFunction(() => window.__test.getTF().name === '5m', { timeout: 20000 });
-await page.waitForTimeout(1000);
-check('flecha abajo baja al anterior',
-  (await page.evaluate(() => window.__test.getTF().name)) === '5m');
+await page.waitForFunction(() => window.__test.getTF().name === '45m', { timeout: 20000 });
+await page.waitForTimeout(1500);
+const vAhora1 = await vista();
+check('flecha abajo baja al timeframe anterior', true, '1h → 45m');
+check('y mantiene el mismo número de velas a la vista (mismo ancho de vela)',
+  Math.abs(vAhora1.velas - vAhora0.velas) < 2,
+  `${vAhora0.velas.toFixed(1)} → ${vAhora1.velas.toFixed(1)} velas`);
+check('acercando de verdad: se ve MENOS tiempo',
+  (vAhora1.to - vAhora1.from) < (vAhora0.to - vAhora0.from) * 0.85,
+  `${((vAhora0.to - vAhora0.from) / 3600).toFixed(0)} h → ${((vAhora1.to - vAhora1.from) / 3600).toFixed(0)} h`);
+check('y el borde derecho sigue pegado al presente',
+  Math.abs(vAhora1.to - vAhora0.to) <= 2 * segs('1h'),
+  `${iso(vAhora0.to)} → ${iso(vAhora1.to)}`);
+await page.keyboard.press('ArrowUp');
+await page.waitForFunction(() => window.__test.getTF().name === '1h', { timeout: 20000 });
+await page.waitForTimeout(1500);
+const vAhora2 = await vista();
+check('flecha arriba sube al siguiente y aleja',
+  Math.abs(vAhora2.velas - vAhora0.velas) < 2
+  && (vAhora2.to - vAhora2.from) > (vAhora1.to - vAhora1.from) * 1.15,
+  `${vAhora2.velas.toFixed(1)} velas · ${((vAhora2.to - vAhora2.from) / 3600).toFixed(0)} h`);
+
+// mirando el pasado, el zoom se hace alrededor del CENTRO de la pantalla
+await page.evaluate(() => window.__test.loadTF(window.__test.getTF(),
+  { view: { from: Date.UTC(2021, 4, 1) / 1000, to: Date.UTC(2021, 4, 20) / 1000 } }));
+await page.waitForTimeout(2500);
+const vPasado0 = await vista();
+await page.keyboard.press('ArrowDown');
+await page.waitForFunction(() => window.__test.getTF().name === '45m', { timeout: 20000 });
+await page.waitForTimeout(1800);
+const vPasado1 = await vista();
+const centroDe = (r) => (r.from + r.to) / 2;
+check('en el pasado la flecha también mantiene el ancho de vela',
+  Math.abs(vPasado1.velas - vPasado0.velas) < 2,
+  `${vPasado0.velas.toFixed(1)} → ${vPasado1.velas.toFixed(1)} velas`);
+check('y acerca alrededor del centro de lo que se está mirando',
+  Math.abs(centroDe(vPasado1) - centroDe(vPasado0)) < 2 * segs('1h')
+  && (vPasado1.to - vPasado1.from) < (vPasado0.to - vPasado0.from) * 0.85,
+  `centro ${iso(centroDe(vPasado0))} → ${iso(centroDe(vPasado1))}, ` +
+  `${((vPasado0.to - vPasado0.from) / 3600).toFixed(0)} h → ${((vPasado1.to - vPasado1.from) / 3600).toFixed(0)} h`);
+
+// y el click en la barra sigue conservando el TRAMO, que es lo contrario
+const vClick0 = await vista();
+await irTF('15m');
+const vClick1 = await vista();
+check('el click en la barra sigue conservando el tramo (no el ancho de vela)',
+  mismoRango(vClick0, vClick1, '45m', '15m') && vClick1.velas > vClick0.velas * 2,
+  `${iso(vClick1.from)}…${iso(vClick1.to)} con ${vClick1.velas.toFixed(0)} velas`);
+
 await irTF('1s');
 await page.keyboard.press('ArrowDown');
 await page.waitForTimeout(1200);

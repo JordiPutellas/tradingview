@@ -73,6 +73,12 @@ const TFS = [
   ['1M',0],['3M',0],['6M',0],['12M',0], // 0 = bucket de calendario
 ].map(([name, seconds]) => ({ name, seconds }));
 
+// Segundos por vela de un timeframe cualquiera. Los de calendario declaran
+// seconds=0 (su bucket real varía), así que se usa la misma aproximación que
+// la API para el tamaño nominal.
+const MESES_SEG = { '1M': 30 * 86400, '3M': 90 * 86400, '6M': 180 * 86400, '12M': 365 * 86400 };
+const pasoDe = (t) => (t.seconds > 0 ? t.seconds : MESES_SEG[t.name] || 30 * 86400);
+
 function bucketStart(tf, t) {
   if (tf.seconds > 0) {
     if (['3D','5D','1W','2W'].includes(tf.name)) {
@@ -281,7 +287,27 @@ async function cargarRango(vista, mine, señal) {
 //   opts.view  {from,to} rango a restaurar; null = ir al presente;
 //              sin definir = conservar el que se está viendo (F4-1.1)
 //   opts.span  nº de velas a la vista al ir al presente (F4-1.3)
+// Modo de las flechas (F4-1.2b): en vez de conservar el rango temporal se
+// conserva el ANCHO DE VELA, o sea el número de velas a la vista. Bajar de
+// temporalidad acerca y subir aleja, que es lo que se espera de un cambio
+// hecho con el teclado mientras se mira un tramo.
+//
+// Qué se queda quieto: pegados al presente, el borde derecho —se sigue viendo
+// la última vela—; mirando el pasado, el centro de la pantalla, que es lo que
+// se está observando.
+function mismasVelas(next) {
+  const r = chart.timeScale().getVisibleLogicalRange();
+  const v = visibleTimeRange();
+  if (!r || !v) return {};                       // sin datos aún: carga normal
+  const velas = Math.max(CONFIG.tfChangeMinBars,
+    Math.min(CONFIG.tfChangeMaxBars, r.to - r.from));
+  if (liveEdge && r.to >= bars.length - 1) return { view: null, span: velas };
+  const centro = (v.from + v.to) / 2, mitad = (velas * pasoDe(next)) / 2;
+  return { view: { from: centro - mitad, to: centro + mitad } };
+}
+
 async function loadTF(next, opts = {}) {
+  if (opts.mismasVelas) opts = { ...opts, ...mismasVelas(next) };
   const vista = opts.view !== undefined ? opts.view : visibleTimeRange();
   const mine = ++seq;
   montando = true;
@@ -303,15 +329,20 @@ async function cargarTF(next, opts, vista, mine, señal) {
   statusEl.textContent = `cargando ${tf.name}…`;
   if (vista && await cargarRango(vista, mine, señal)) { saveView(); return; }
   if (mine !== seq) return;
-  const filas = await fetchCandles({ limit: Math.max(1500, Math.round(opts.span || 0) + 500) }, señal);
+  const span = Math.min(opts.span || 0, CONFIG.tfChangeMaxBars);
+  const filas = await fetchCandles({ limit: Math.max(1500, Math.round(span) + 500) }, señal);
   if (mine !== seq) return;
   bars = filas;
   render();
   chart.timeScale().resetTimeScale();
   chart.timeScale().scrollToRealTime();
-  if (opts.span > 1) {
-    const r = chart.timeScale().getVisibleLogicalRange();
-    if (r) chart.timeScale().setVisibleLogicalRange({ from: r.to - opts.span, to: r.to });
+  if (span > 1) {
+    // Contado desde la ÚLTIMA vela y no desde el rango que devuelva LWC en
+    // este instante: scrollToRealTime() no ha terminado necesariamente de
+    // aplicarse y leerlo aquí dejaba la ventana semanas por detrás del
+    // presente (lo pilló el test del borde derecho con las flechas).
+    const n = bars.length;
+    chart.timeScale().setVisibleLogicalRange({ from: n - span, to: n });
   }
   avisar(vista ? 'sin datos en ese tramo' : '');
   saveView();
@@ -514,8 +545,10 @@ for (const t of TFS) {
   tfsEl.appendChild(b);
 }
 
-// Flechas arriba/abajo: timeframe siguiente/anterior en el orden de la barra,
-// conservando la posición temporal (F4-1.2). En los extremos no hacen nada.
+// Flechas arriba/abajo: timeframe siguiente/anterior en el orden de la barra.
+// A diferencia del click en la barra, que conserva el TRAMO, las flechas
+// conservan el ancho de vela: sirven para acercarse y alejarse. En los
+// extremos no hacen nada.
 addEventListener('keydown', (e) => {
   if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
   if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
@@ -525,7 +558,7 @@ addEventListener('keydown', (e) => {
   if (el && (el.isContentEditable || ['INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName))) return;
   e.preventDefault();
   const i = TFS.findIndex(x => x.name === tf.name) + (e.key === 'ArrowUp' ? 1 : -1);
-  if (i >= 0 && i < TFS.length) loadTF(TFS[i]);
+  if (i >= 0 && i < TFS.length) loadTF(TFS[i], { mismasVelas: true });
 });
 
 // End: volver al presente conservando el ancho de la ventana. Con 1.1 y 1.3 se
