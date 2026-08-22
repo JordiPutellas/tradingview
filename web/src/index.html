@@ -54,6 +54,7 @@
                       border-radius:4px; padding:2px 6px; cursor:pointer; font:inherit; }
   #drawPanel button:hover { background:#404040; }
   #drawPanel button.active { color:var(--accent); border-color:var(--border); background:#404040; }
+  #drawPanel select[data-k="tpl"] { flex:1; min-width:0; }
 </style>
 </head>
 <body>
@@ -97,6 +98,16 @@
   <div class="row row-text"><input type="text" data-k="text" placeholder="Texto"></div>
   <div class="row row-zone"><span style="color:var(--muted)">Línea</span>
     <button data-line="0">A</button><button data-line="1">B</button></div>
+  <div class="row row-tpl">
+    <select data-k="tpl" title="Aplicar una plantilla de estilo"><option value="">— plantilla —</option></select>
+    <button data-act="tpl-save" title="Guardar el estilo actual como plantilla">＋</button>
+    <button data-act="tpl-def" title="Marcar la plantilla como predeterminada">★</button>
+    <button data-act="tpl-del" title="Borrar la plantilla">✕</button>
+  </div>
+  <div class="row row-tpl-name" hidden>
+    <input type="text" data-k="tplName" placeholder="Nombre de la plantilla" maxlength="40">
+    <button data-act="tpl-ok">Guardar</button>
+  </div>
 </div>
 <script src="app.js"></script>
 </body>

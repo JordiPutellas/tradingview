@@ -12,6 +12,7 @@
 import { TYPES, DEFAULT_STYLE, drawHandles, drawSelection } from './shapes.js';
 import { HANDLE, dist, rgba, fmtDuration, fmtPrice } from './geom.js';
 import { logicalOf as aLogico, timeOfLogical as aTiempo } from '../timemap.js';
+import { Estilos } from './styles.js';
 
 const PERSIST_MS = 400;
 const uuid = () => crypto.randomUUID();
@@ -29,6 +30,7 @@ export class DrawEngine {
     this.autoscaleWithShapes = autoscaleWithShapes || (() => false);
 
     this.shapes = [];
+    this.estilos = new Estilos();           // estilo por defecto y plantillas (F4-2)
     this.selectedId = null;
     this.activeLine = 0;                    // en zone2, qué línea edita el panel
     this.pending = null;                    // creación en curso
@@ -466,11 +468,15 @@ export class DrawEngine {
   // Alta de una figura (la usan la creación por clicks y los tests).
   addShape(type, points, extra = {}) {
     if (TYPES[type].linked) points.forEach(q => { q.t = points[0].t; });
+    // El estilo por defecto es el último que se aplicó a esta herramienta
+    // (F4-2.1), no una constante: es lo que espera quien dibuja diez zonas
+    // seguidas del mismo color.
+    const base = this.estilos.para(type);
     const s = {
       id: extra.id || uuid(), type,
       points: points.map(q => ({ t: q.t, p: q.p })),
-      style: { ...DEFAULT_STYLE, ...(extra.style || {}) },
-      ...(TYPES[type].linked ? { style2: { ...DEFAULT_STYLE, color: '#3fb950', ...(extra.style2 || {}) } } : {}),
+      style: { ...base.style, ...(extra.style || {}) },
+      ...(TYPES[type].linked ? { style2: { ...base.style2, ...(extra.style2 || {}) } } : {}),
       ...(TYPES[type].text ? { text: extra.text ?? 'Texto' } : {}),
     };
     this.shapes.push(s);
@@ -486,7 +492,8 @@ export class DrawEngine {
     while (all.length < need) all.push(all[all.length - 1]);
     const points = all.slice(0, need);
     if (TYPES[type].linked) points.forEach(q => { q.t = points[0].t; });
-    return { id: '__preview', type, points, style: { ...DEFAULT_STYLE }, style2: { ...DEFAULT_STYLE }, text: 'Texto' };
+    const base = this.estilos.para(type);
+    return { id: '__preview', type, points, style: base.style, style2: base.style2, text: 'Texto' };
   }
 
   // ---------- selección y estilo ----------
@@ -517,8 +524,31 @@ export class DrawEngine {
     const s = this.selected();
     if (!s) return;
     Object.assign(this.styleOf(s), patch);
+    this.estilos.recordar(s.type, s.style, s.style2);
     this.redraw();
     this.save(s);
+  }
+
+  // ---------- plantillas de estilo (F4-2.2) ----------
+  // Se aplican a la figura YA seleccionada, no solo a las nuevas, y de paso
+  // pasan a ser el estilo por defecto de esa herramienta: aplicar una
+  // plantilla es una modificación de estilo como cualquier otra (F4-2.1).
+  aplicarPlantilla(nombre) {
+    const s = this.selected(), t = this.estilos.get(nombre);
+    if (!s || !t) return false;
+    Object.assign(s.style, t.style);
+    if (s.style2) Object.assign(s.style2, t.style2 || t.style);
+    this.estilos.recordar(s.type, s.style, s.style2);
+    this.redraw();
+    this.save(s);
+    this.onSelect(s, this);
+    return true;
+  }
+
+  guardarPlantilla(nombre) {
+    const s = this.selected();
+    if (!s) return null;
+    return this.estilos.guardar(nombre, s.style, s.style2);
   }
 
   setText(text) {

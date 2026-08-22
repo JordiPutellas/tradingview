@@ -545,6 +545,115 @@ if (centro) {
     `${px['30,30,30'] || 0} px de crosshair`);
 }
 
+
+// ------------------------------------------- F4-2. estilo por defecto y plantillas
+await limpiar();
+const estiloDe = (i = 0) => page.evaluate((k) => {
+  const s = window.__test.engine.shapes[k];
+  return s ? { ...s.style, type: s.type } : null;
+}, i);
+const ponEstilo = (k, v) => page.evaluate(([kk, vv]) => {
+  const i = document.querySelector(`#drawPanel [data-k="${kk}"]`);
+  i.value = vv; i.dispatchEvent(new Event('input', { bubbles: true }));
+}, [k, v]);
+
+// 2.1 — lo último aplicado se vuelve el defecto de esa herramienta
+await crear('trend', [[400, 300], [700, 380]]);
+await page.mouse.click(550, 340);
+await wait(300);
+await ponEstilo('color', '#00ffff');
+await ponEstilo('width', '4');
+await wait(400);
+await limpiar();
+await crear('trend', [[300, 500], [600, 560]]);
+const heredado = await estiloDe();
+const pxHeredado = await pixeles();
+check('el último estilo aplicado se vuelve el defecto de la herramienta',
+  heredado.color === '#00ffff' && heredado.width === 4, JSON.stringify(heredado));
+check('y se ve pintado en el dibujo nuevo', cuenta(pxHeredado, '0,255,255') > 200,
+  `${cuenta(pxHeredado, '0,255,255')} px cian`);
+
+// y sobrevive a la recarga
+await page.reload();
+await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
+await wait(700);
+await limpiar();
+await crear('trend', [[350, 450], [650, 520]]);
+const trasRecargarEstilo = await estiloDe();
+check('el estilo por defecto sobrevive a la recarga',
+  trasRecargarEstilo.color === '#00ffff' && trasRecargarEstilo.width === 4,
+  JSON.stringify(trasRecargarEstilo));
+
+// 2.2 — plantillas: guardar, aplicar a un dibujo YA existente, marcar y borrar
+const agarreTrend = await page.evaluate(() => {
+  const e = window.__test.engine, s = e.shapes[0];
+  const pts = e.screenPoints(s), r = e.paneRect();
+  return { x: r.left + (pts[0].x + pts[1].x) / 2, y: r.top + (pts[0].y + pts[1].y) / 2 };
+});
+await page.mouse.click(agarreTrend.x, agarreTrend.y);
+await wait(300);
+await page.click('#drawPanel [data-act="tpl-save"]');
+await page.fill('#drawPanel [data-k="tplName"]', 'cian gordo');
+await page.click('#drawPanel [data-act="tpl-ok"]');
+await wait(300);
+const opciones = () => page.evaluate(() =>
+  [...document.querySelectorAll('#drawPanel [data-k="tpl"] option')].map(o => o.textContent));
+check('la plantilla se guarda y aparece en la lista',
+  (await opciones()).some(o => o.includes('cian gordo')), JSON.stringify(await opciones()));
+
+// se cambia el estilo del dibujo y la plantilla lo devuelve a su sitio
+await ponEstilo('color', '#ff8800');
+await ponEstilo('width', '1');
+await wait(400);
+const cambiado = await estiloDe();
+await page.selectOption('#drawPanel [data-k="tpl"]', 'cian gordo');
+await wait(500);
+const restaurado = await estiloDe();
+const pxRestaurado = await pixeles();
+check('aplicar una plantilla cambia un dibujo YA existente',
+  cambiado.color === '#ff8800' && restaurado.color === '#00ffff' && restaurado.width === 4,
+  `${cambiado.color}/${cambiado.width} → ${restaurado.color}/${restaurado.width}`);
+check('y se ve en el lienzo, no solo en el modelo', cuenta(pxRestaurado, '0,255,255') > 200,
+  `${cuenta(pxRestaurado, '0,255,255')} px cian`);
+
+// marcarla como predeterminada manda también sobre OTRAS herramientas
+await ponEstilo('color', '#ff8800');            // ensucia el defecto de trend
+await wait(300);
+await page.click('#drawPanel [data-act="tpl-def"]');
+await wait(300);
+check('la predeterminada se marca en la lista',
+  (await opciones()).some(o => o.startsWith('★')), JSON.stringify(await opciones()));
+await limpiar();
+await crear('rect', [[500, 250], [800, 400]]);
+const rectNuevo = await estiloDe();
+check('la plantilla predeterminada estrena las demás herramientas',
+  rectNuevo.color === '#00ffff' && rectNuevo.width === 4, JSON.stringify(rectNuevo));
+await limpiar();
+await crear('trend', [[300, 300], [600, 360]]);
+const trendTrasDefecto = await estiloDe();
+check('y también las que ya se habían tocado a mano',
+  trendTrasDefecto.color === '#00ffff', JSON.stringify(trendTrasDefecto));
+
+// borrar la plantilla
+await page.mouse.click(
+  ...Object.values(await page.evaluate(() => {
+    const e = window.__test.engine, s = e.shapes[0];
+    const pts = e.screenPoints(s), r = e.paneRect();
+    return { x: r.left + (pts[0].x + pts[1].x) / 2, y: r.top + (pts[0].y + pts[1].y) / 2 };
+  })));
+await wait(300);
+await page.selectOption('#drawPanel [data-k="tpl"]', 'cian gordo');
+await wait(300);
+await page.click('#drawPanel [data-act="tpl-del"]');
+await wait(300);
+check('la plantilla se puede borrar',
+  !(await opciones()).some(o => o.includes('cian gordo')), JSON.stringify(await opciones()));
+await page.evaluate(() => {
+  ['btcdash.estiloActual', 'btcdash.plantillas', 'btcdash.plantillaDefecto']
+    .forEach(k => localStorage.removeItem(k));
+});
+await limpiar();
+
 // --------------------------------------------------- 9. limpieza final
 await page.evaluate(async () => {
   for (const d of await (await fetch('/api/drawings')).json()) {

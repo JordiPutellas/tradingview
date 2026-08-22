@@ -12,8 +12,11 @@ export function mountPanel(engine, panelEl) {
     fill: q('[data-k="fill"]'),
     fillOpacity: q('[data-k="fillOpacity"]'),
     text: q('[data-k="text"]'),
+    tpl: q('[data-k="tpl"]'),
+    tplName: q('[data-k="tplName"]'),
   };
-  const rows = { fill: q('.row-fill'), text: q('.row-text'), zone: q('.row-zone') };
+  const rows = { fill: q('.row-fill'), text: q('.row-text'), zone: q('.row-zone'),
+    tplName: q('.row-tpl-name') };
 
   // El panel vive fuera del contenedor del gráfico: sus clicks no llegan al
   // motor y por tanto no deseleccionan.
@@ -28,6 +31,54 @@ export function mountPanel(engine, panelEl) {
   inputs.fillOpacity.oninput = (e) => patch('fillOpacity', Number(e.target.value));
   inputs.text.oninput = (e) => engine.setText(e.target.value);
   q('[data-act="del"]').onclick = () => engine.deleteSelected();
+
+  // --- plantillas de estilo (F4-2.2) ---
+  // Elegir una la aplica a la figura seleccionada en el acto: el requisito es
+  // poder cambiar el estilo de un dibujo YA hecho, no solo de los próximos.
+  function pintarPlantillas(elegida) {
+    const est = engine.estilos;
+    const nombres = est.nombres();
+    inputs.tpl.innerHTML = '';
+    const vacio = document.createElement('option');
+    vacio.value = ''; vacio.textContent = nombres.length ? '— plantilla —' : '— sin plantillas —';
+    inputs.tpl.appendChild(vacio);
+    for (const n of nombres) {
+      const o = document.createElement('option');
+      o.value = n;
+      o.textContent = est.def === n ? `★ ${n}` : n;   // la predeterminada, marcada
+      inputs.tpl.appendChild(o);
+    }
+    inputs.tpl.value = elegida && nombres.includes(elegida) ? elegida : '';
+  }
+  inputs.tpl.onchange = () => {
+    if (inputs.tpl.value) engine.aplicarPlantilla(inputs.tpl.value);
+  };
+  q('[data-act="tpl-save"]').onclick = () => {
+    rows.tplName.hidden = false;
+    inputs.tplName.value = inputs.tpl.value || '';
+    inputs.tplName.focus();
+  };
+  const guardarPlantilla = () => {
+    const n = engine.guardarPlantilla(inputs.tplName.value);
+    if (!n) return;
+    rows.tplName.hidden = true;
+    pintarPlantillas(n);
+  };
+  q('[data-act="tpl-ok"]').onclick = guardarPlantilla;
+  inputs.tplName.onkeydown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); guardarPlantilla(); }
+    if (e.key === 'Escape') { e.preventDefault(); rows.tplName.hidden = true; inputs.tplName.blur(); }
+  };
+  q('[data-act="tpl-def"]').onclick = () => {
+    if (!inputs.tpl.value) return;
+    engine.estilos.marcarDefecto(inputs.tpl.value);
+    pintarPlantillas(inputs.tpl.value);
+  };
+  q('[data-act="tpl-del"]').onclick = () => {
+    if (!inputs.tpl.value) return;
+    engine.estilos.borrar(inputs.tpl.value);
+    pintarPlantillas(null);
+  };
   panelEl.querySelectorAll('[data-line]').forEach(b => {
     b.onclick = () => { engine.activeLine = Number(b.dataset.line); refresh(engine.selected()); };
   });
@@ -47,6 +98,7 @@ export function mountPanel(engine, panelEl) {
     rows.text.hidden = !t.text;
     rows.zone.hidden = !t.linked;
     if (t.text) inputs.text.value = s.text || '';
+    pintarPlantillas(inputs.tpl.value);
     panelEl.querySelectorAll('[data-line]').forEach(b => {
       b.classList.toggle('active', Number(b.dataset.line) === engine.activeLine);
     });
