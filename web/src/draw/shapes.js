@@ -77,14 +77,33 @@ export const TYPES = {
     },
     hit: (x, y, s, p) => distToRectBorder(x, y, p[0].x, p[0].y, p[1].x, p[1].y) <= TOL
       || insideRect(x, y, p[0].x, p[0].y, p[1].x, p[1].y),
-    handles: (p) => [p[0], { x: p[1].x, y: p[0].y }, p[1], { x: p[0].x, y: p[1].y }],
-    // El rectángulo tiene 4 esquinas pero solo 2 puntos: cada esquina toca
-    // una combinación distinta de ejes.
+    // Cuatro esquinas (círculos) y cuatro centros de lado (cuadrados), como
+    // en TradingView: la esquina mueve los dos ejes y el lado mueve SOLO el
+    // suyo, así se ajusta el alto o el ancho sin tocar el otro anclaje.
+    handles: (p) => {
+      const mx = (p[0].x + p[1].x) / 2, my = (p[0].y + p[1].y) / 2;
+      return [
+        { x: p[0].x, y: p[0].y, forma: 'circulo' },
+        { x: p[1].x, y: p[0].y, forma: 'circulo' },
+        { x: p[1].x, y: p[1].y, forma: 'circulo' },
+        { x: p[0].x, y: p[1].y, forma: 'circulo' },
+        { x: mx, y: p[0].y },      // lado de arriba
+        { x: p[1].x, y: my },      // lado derecho
+        { x: mx, y: p[1].y },      // lado de abajo
+        { x: p[0].x, y: my },      // lado izquierdo
+      ];
+    },
+    // El rectángulo tiene 8 tiradores pero solo 2 puntos: cada uno toca una
+    // combinación distinta de ejes.
     handleTargets: (i) => [
       [{ i: 0, axes: 'xy' }],
       [{ i: 1, axes: 'x' }, { i: 0, axes: 'y' }],
       [{ i: 1, axes: 'xy' }],
       [{ i: 0, axes: 'x' }, { i: 1, axes: 'y' }],
+      [{ i: 0, axes: 'y' }],
+      [{ i: 1, axes: 'x' }],
+      [{ i: 1, axes: 'y' }],
+      [{ i: 0, axes: 'x' }],
     ][i] || [],
   },
   curve: {
@@ -115,15 +134,6 @@ export const TYPES = {
     },
     handles: (p) => p,
   },
-  point: {
-    label: 'Punto', points: 1, fill: false,
-    draw(ctx, s, p) {
-      ctx.fillStyle = rgba(s.style.color, s.style.opacity);
-      ctx.beginPath(); ctx.arc(p[0].x, p[0].y, 2 + s.style.width, 0, 2 * Math.PI); ctx.fill();
-    },
-    hit: (x, y, s, p) => dist(x, y, p[0].x, p[0].y) <= 4 + s.style.width + TOL / 2,
-    handles: (p) => [p[0]],
-  },
   text: {
     label: 'Texto', points: 1, fill: true, text: true,
     draw(ctx, s, p) {
@@ -152,8 +162,15 @@ export function drawHandles(ctx, pts) {
   for (const p of pts) {
     ctx.fillStyle = '#ffffff';
     ctx.strokeStyle = '#111111';
-    ctx.fillRect(p.x - HANDLE, p.y - HANDLE, HANDLE * 2, HANDLE * 2);
-    ctx.strokeRect(p.x - HANDLE, p.y - HANDLE, HANDLE * 2, HANDLE * 2);
+    if (p.forma === 'circulo') {       // anclas del rectángulo
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, HANDLE + 1, 0, 2 * Math.PI);
+      ctx.fill();
+      ctx.stroke();
+    } else {                            // centros de lado
+      ctx.fillRect(p.x - HANDLE, p.y - HANDLE, HANDLE * 2, HANDLE * 2);
+      ctx.strokeRect(p.x - HANDLE, p.y - HANDLE, HANDLE * 2, HANDLE * 2);
+    }
   }
 }
 

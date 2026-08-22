@@ -5,6 +5,18 @@
 //
 // Uso: node draw-test.mjs   (API en 127.0.0.1:8090 sirviendo web/dist)
 import { chromium } from 'playwright';
+import { existsSync } from 'node:fs';
+
+// Chromium de Playwright necesita libnss3/libnspr4 y en esta máquina no están
+// en el sistema (no hay sudo para instalarlas). Si están extraídas en la caché
+// del usuario, se le añaden al entorno para que el navegador arranque:
+//   mkdir -p ~/.cache/playwright-sys-libs && cd $_ \
+//     && apt-get download libnss3 libnspr4 && for d in *.deb; do dpkg-deb -x $d .; done
+const LIBS = `${process.env.HOME}/.cache/playwright-sys-libs/usr/lib/x86_64-linux-gnu`;
+if (existsSync(LIBS)) {
+  process.env.LD_LIBRARY_PATH = [LIBS, process.env.LD_LIBRARY_PATH].filter(Boolean).join(':');
+}
+
 
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1400, height: 800 } });
@@ -120,14 +132,13 @@ const HERRAMIENTAS = [
   ['rect', [[750, 300], [900, 420]]],
   ['curve', [[300, 600], [400, 560], [500, 640], [600, 600]]],
   ['arc', [[950, 500], [1000, 460], [1050, 520]]],
-  ['point', [[860, 550]]],
   ['text', [[300, 200]]],
   ['zone2', [[600, 620], [640, 660]]],
 ];
 for (const [tool, pts] of HERRAMIENTAS) await crear(tool, pts);
 const creado = await estado();
-check('las 9 figuras se crean con clicks reales',
-  creado.n === 9 && HERRAMIENTAS.every(([t]) => creado.tipos.includes(t)),
+check('las 8 figuras se crean con clicks reales',
+  creado.n === HERRAMIENTAS.length && HERRAMIENTAS.every(([t]) => creado.tipos.includes(t)),
   `${creado.n} figuras: ${creado.tipos.join(', ')}`);
 check('cada figura guarda tiempo UTC y precio, no índices',
   creado.figuras.every(f => f.pts.every(q => q.t > 1_500_000_000 && q.p > 1000 && q.p < 1e6)),
@@ -315,6 +326,52 @@ check('el handle redimensiona SOLO su punto',
   && r1.pts[1].t > r0.pts[1].t && r1.pts[1].p < r0.pts[1].p,
   `p0 igual (${(r1.pts[0].p - r0.pts[0].p).toFixed(2)}), p1 +${r1.pts[1].t - r0.pts[1].t}s`);
 
+// ------------------- 4b. lados del rectángulo: un solo eje cada uno (F4b)
+// Como en TradingView: los centros de lado ajustan alto o ancho sin tocar el
+// otro anclaje. Antes solo había esquinas y no se podía estirar en un eje.
+const centroRect2 = await page.evaluate(() => {
+  const e = window.__test.engine;
+  const s = e.shapes.find(x => x.type === 'rect');
+  const pts = e.screenPoints(s), r = e.paneRect();
+  return { x: r.left + (pts[0].x + pts[1].x) / 2, y: r.top + (pts[0].y + pts[1].y) / 2 };
+});
+await page.mouse.click(centroRect2.x, centroRect2.y);
+await wait(300);
+const lados = () => page.evaluate(() => {
+  const e = window.__test.engine;
+  const s = e.shapes.find(x => x.type === 'rect');
+  const pts = e.screenPoints(s), r = e.paneRect();
+  const mx = (pts[0].x + pts[1].x) / 2, my = (pts[0].y + pts[1].y) / 2;
+  return { arriba: { x: r.left + mx, y: r.top + pts[0].y },
+           derecha: { x: r.left + pts[1].x, y: r.top + my } };
+});
+const l0 = await lados();
+const rA = (await estado()).figuras.find(f => f.type === 'rect');
+await arrastrar(l0.arriba.x, l0.arriba.y, l0.arriba.x + 60, l0.arriba.y + 45);   // se mueve también en X
+const rB = (await estado()).figuras.find(f => f.type === 'rect');
+check('el lado de arriba cambia el ALTO y no toca el ancho',
+  Math.abs(rB.pts[0].p - rA.pts[0].p) > 1 && Math.abs(rB.pts[1].p - rA.pts[1].p) < 0.01
+  && rB.pts[0].t === rA.pts[0].t && rB.pts[1].t === rA.pts[1].t,
+  `Δp0=${(rB.pts[0].p - rA.pts[0].p).toFixed(2)} Δp1=${(rB.pts[1].p - rA.pts[1].p).toFixed(2)} · Δt0=${rB.pts[0].t - rA.pts[0].t}s Δt1=${rB.pts[1].t - rA.pts[1].t}s`);
+const l1 = await lados();
+await arrastrar(l1.derecha.x, l1.derecha.y, l1.derecha.x + 90, l1.derecha.y - 50);
+const rC = (await estado()).figuras.find(f => f.type === 'rect');
+check('el lado derecho cambia el ANCHO y no toca el alto',
+  rC.pts[1].t > rB.pts[1].t && rC.pts[0].t === rB.pts[0].t
+  && Math.abs(rC.pts[0].p - rB.pts[0].p) < 0.01 && Math.abs(rC.pts[1].p - rB.pts[1].p) < 0.01,
+  `Δt1=${rC.pts[1].t - rB.pts[1].t}s · Δp0=${(rC.pts[0].p - rB.pts[0].p).toFixed(2)} Δp1=${(rC.pts[1].p - rB.pts[1].p).toFixed(2)}`);
+const tiradores = await page.evaluate(() => {
+  const e = window.__test.engine;
+  const s = e.shapes.find(x => x.type === 'rect');
+  const p = e.screenPoints(s);
+  const mx = (p[0].x + p[1].x) / 2, my = (p[0].y + p[1].y) / 2;
+  return [[p[0].x, p[0].y], [p[1].x, p[0].y], [p[1].x, p[1].y], [p[0].x, p[1].y],
+    [mx, p[0].y], [p[1].x, my], [mx, p[1].y], [p[0].x, my]]
+    .map(([x, y]) => e._handleAt(x, y)).filter(i => i >= 0).length;
+});
+check('el rectángulo tiene ocho tiradores: cuatro esquinas y cuatro lados',
+  tiradores === 8, `${tiradores}/8 agarrables`);
+
 // --------------------------------------------------------- 5. panel en vivo
 await page.evaluate(() => {
   const i = document.querySelector('#drawPanel [data-k="color"]');
@@ -365,7 +422,7 @@ check('Supr borra el dibujo seleccionado', trasBorrar.n === antesBorrar - 1 && t
 // borrar ANTES de que venza el guardado diferido no puede resucitar la figura
 // en la siguiente recarga (el debounce escribía después del DELETE).
 const antesFugaz = (await estado()).n;
-await page.click('button[data-tool="point"]');
+await page.click('button[data-tool="hline"]');
 await page.mouse.click(430, 330);
 await page.keyboard.press('Delete');
 await wait(1200);
@@ -797,7 +854,7 @@ await page.evaluate(() => {
   const { engine, getBars } = window.__test;
   const b = getBars();
   for (let i = 0; i < 55; i++) {
-    engine.addShape('point', [{ t: b[b.length - 200 + i][0], p: b[b.length - 1][4] * (1 + i / 1000) }]);
+    engine.addShape('hline', [{ t: b[b.length - 200 + i][0], p: b[b.length - 1][4] * (1 + i / 1000) }]);
   }
 });
 await wait(400);
@@ -875,7 +932,7 @@ await wait(200);
 check('el botón del imán se enciende',
   await page.evaluate(() => window.__test.engine.iman === true
     && document.querySelector('button[data-tool="__magnet"]').classList.contains('active')));
-await page.click('button[data-tool="point"]');
+await page.click('button[data-tool="hline"]');
 await page.mouse.click(d.x + 1, d.y - 7);        // 7 px por encima del máximo
 await wait(500);
 const conIman = (await estado()).figuras[0].pts[0];
@@ -889,7 +946,7 @@ await page.keyboard.press('m');                   // atajo de teclado
 await wait(200);
 check('la tecla M apaga el imán',
   await page.evaluate(() => window.__test.engine.iman === false));
-await page.click('button[data-tool="point"]');
+await page.click('button[data-tool="hline"]');
 await page.mouse.click(d.x + 1, d.y - 7);
 await wait(500);
 const sinIman = (await estado()).figuras[0].pts[0];
