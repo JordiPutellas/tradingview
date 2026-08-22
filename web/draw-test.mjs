@@ -173,10 +173,19 @@ const agarre = () => page.evaluate(() => {
 for (const [tool, pts] of HERRAMIENTAS) {
   await limpiar();
   await crear(tool, pts);
-  const g = await agarre();
+  let g = await agarre();
   await page.mouse.click(g.x, g.y);              // seleccionar
   await wait(250);
-  const a0 = await estado();
+  let a0 = await estado();
+  if (a0.sel === null) {
+    // La escala de precio se reajusta con cada vela en vivo y el punto de
+    // agarre calculado hace 250 ms puede haberse movido unos píxeles: se
+    // recalcula y se reintenta antes de dar el fallo por bueno.
+    g = await agarre();
+    await page.mouse.click(g.x, g.y);
+    await wait(250);
+    a0 = await estado();
+  }
   if (a0.sel === null) { check(`${tool}: se puede seleccionar con click`, false, 'no seleccionó'); continue; }
   await arrastrar(g.x, g.y, g.x + 130, g.y - 55);
   const a1 = await estado();
@@ -921,6 +930,65 @@ check('elegir una herramienta deja de ocultar los dibujos',
   await page.evaluate(() => window.__test.engine.ocultos === false));
 await page.keyboard.press('Escape');
 await page.evaluate(() => { window.__test.engine.setOcultos(false); window.__test.engine.setBloqueados(false); });
+await limpiar();
+
+
+// ------------------------------------------------------- F4-3.5 duplicar
+await limpiar();
+await crear('trend', [[400, 300], [700, 400]]);
+await page.evaluate(() => {
+  const e = window.__test.engine, s = e.shapes[0];
+  s.style.color = '#ffcc00'; s.style.width = 3; e.redraw();
+});
+const gTrend2 = await page.evaluate(() => {
+  const e = window.__test.engine, s = e.shapes[0];
+  const pts = e.screenPoints(s), r = e.paneRect();
+  return { x: r.left + (pts[0].x + pts[1].x) / 2, y: r.top + (pts[0].y + pts[1].y) / 2 };
+});
+await page.mouse.click(gTrend2.x, gTrend2.y);
+await wait(300);
+await page.keyboard.press('Control+c');
+await page.keyboard.press('Control+v');
+await wait(600);
+const pegado = await estado();
+check('Ctrl+C / Ctrl+V duplica el dibujo seleccionado', pegado.n === 2,
+  `${pegado.n} figuras: ${pegado.tipos.join(', ')}`);
+check('la copia conserva el estilo del original',
+  pegado.n === 2 && pegado.figuras[1].style.color === '#ffcc00' && pegado.figuras[1].style.width === 3,
+  JSON.stringify(pegado.figuras[1]?.style));
+check('y aparece desplazada, no encima',
+  pegado.n === 2 && pegado.figuras[1].pts[0].t > pegado.figuras[0].pts[0].t
+  && pegado.figuras[1].pts[0].p < pegado.figuras[0].pts[0].p,
+  `Δt=${pegado.figuras[1].pts[0].t - pegado.figuras[0].pts[0].t}s`);
+check('la copia queda seleccionada', pegado.sel === pegado.figuras[1].id);
+await page.keyboard.press('Control+z');
+await wait(600);
+check('deshacer se lleva la copia', (await estado()).n === 1);
+
+// Alt + arrastrar: el original se queda y la copia se va con el ratón
+const antesAlt = await estado();
+const gAlt = await page.evaluate(() => {
+  const e = window.__test.engine, s = e.shapes[0];
+  const pts = e.screenPoints(s), r = e.paneRect();
+  return { x: r.left + (pts[0].x + pts[1].x) / 2, y: r.top + (pts[0].y + pts[1].y) / 2 };
+});
+await page.mouse.move(gAlt.x, gAlt.y);
+await page.keyboard.down('Alt');
+await page.mouse.down();
+for (let i = 1; i <= 10; i++) await page.mouse.move(gAlt.x + 14 * i, gAlt.y - 5 * i);
+await page.mouse.up();
+await page.keyboard.up('Alt');
+await wait(500);
+const trasAlt = await estado();
+const original = trasAlt.figuras.find(f => f.id === antesAlt.figuras[0].id);
+const copia = trasAlt.figuras.find(f => f.id !== antesAlt.figuras[0].id);
+check('Alt + arrastrar duplica y mueve la copia',
+  trasAlt.n === 2 && original && copia
+  && Math.abs(original.pts[0].t - antesAlt.figuras[0].pts[0].t) < 2
+  && copia.pts[0].t > original.pts[0].t && copia.pts[0].p > original.pts[0].p,
+  `original quieto (Δt=${original ? original.pts[0].t - antesAlt.figuras[0].pts[0].t : '?'}), copia Δt=${copia ? copia.pts[0].t - original.pts[0].t : '?'}s`);
+check('y el gráfico no se movió', trasAlt.rango.from === antesAlt.rango.from,
+  `${antesAlt.rango.from} → ${trasAlt.rango.from}`);
 await limpiar();
 
 // --------------------------------------------------- 9. limpieza final

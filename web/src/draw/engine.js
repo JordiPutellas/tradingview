@@ -364,11 +364,13 @@ export class DrawEngine {
     // 3) redimensionar por un punto de control
     if (handleIdx >= 0) { take(); this._startDrag('resize', handleIdx, p, e.shiftKey); return; }
 
-    // 4) seleccionar y mover
+    // 4) seleccionar y mover. Con Alt se arrastra una COPIA y el original se
+    //    queda donde estaba (F4-3.5).
     const hit = this._shapeAt(p.x, p.y);
     if (hit) {
       take();
-      this._select(hit.id, p);
+      const objetivo = e.altKey ? this._duplicar(this.toJSON(hit)) : hit;
+      this._select(objetivo.id, p);
       this._startDrag('move', -1, p, e.shiftKey);
       return;
     }
@@ -550,6 +552,14 @@ export class DrawEngine {
     // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y. Escribiendo en un campo manda el
     // deshacer del navegador, que es lo que espera cualquiera.
     const mod = e.ctrlKey || e.metaKey;
+    // Copiar y pegar solo se secuestran con una figura seleccionada o algo
+    // copiado antes: sin eso, el Ctrl+C del navegador sigue siendo el suyo.
+    if (mod && !escribiendo && (e.key === 'c' || e.key === 'C') && this.selected()) {
+      e.preventDefault(); this.copiar(); return;
+    }
+    if (mod && !escribiendo && (e.key === 'v' || e.key === 'V') && this.clip) {
+      e.preventDefault(); this.pegar(); return;
+    }
     if (mod && !escribiendo && (e.key === 'z' || e.key === 'Z')) {
       e.preventDefault();
       if (e.shiftKey) this.redo(); else this.undo();
@@ -706,6 +716,36 @@ export class DrawEngine {
   }
 
   deleteSelected() { this.remove(this.selectedId); }
+
+  // ---------- duplicar (F4-3.5) ----------
+  // El portapapeles es del gráfico, no del sistema: copiar un dibujo no puede
+  // pisar lo que el usuario tenga copiado fuera.
+  copiar() {
+    const s = this.selected();
+    if (!s) return false;
+    this.clip = this.toJSON(s);
+    return true;
+  }
+
+  pegar() {
+    if (!this.clip) return null;
+    // Desplazada 20 px: encima del original no se vería que hay dos.
+    const s = this._duplicar(this.clip, 20, 20);
+    if (s) this._select(s.id);
+    return s;
+  }
+
+  _duplicar(json, dx = 0, dy = 0) {
+    const points = json.points.map(q => {
+      if (!dx && !dy) return { t: q.t, p: q.p };
+      const x = this.xOf(q.t), y = this.yOf(q.p);
+      if (x === null || y === null) return { t: q.t, p: q.p };
+      const t = this.timeOfX(x + dx), pr = this.priceOfY(y + dy);
+      return Number.isFinite(t) && Number.isFinite(pr) ? { t, p: pr } : { t: q.t, p: q.p };
+    });
+    return this.addShape(json.type, points,
+      { style: json.style, style2: json.style2, text: json.text });
+  }
 
   // Toda baja pasa por aquí: primero se cancela el guardado diferido y solo
   // después se pide el borrado. Si no, el debounce escribía la figura DESPUÉS
