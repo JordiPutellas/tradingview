@@ -387,6 +387,79 @@ coordenadas) y comprueba efectos: que la figura se mueve en los dos ejes, que
 el **rango visible del gráfico no cambia** durante el arrastre, y los píxeles
 pintados en el canvas tras cada cambio del panel.
 
+**Navegación, estilos y ergonomía (F4).** Lo que cambió en el manejo diario:
+
+- **El rango temporal visible sobrevive al cambio de timeframe.** Se guarda en
+  tiempo UTC absoluto antes de cambiar, se pide ese tramo en el destino y se
+  restaura. Decisión sobre el número de barras: **tope de 12.000 velas
+  visibles** (`cfg.tfChangeMaxBars`) y **suelo de 20** (`cfg.tfChangeMinBars`).
+  Dos años en 1h son ~17.500 velas, pero en 1s serían 60 millones: por encima
+  del tope se centra en el mismo instante y se enseñan las que caben, con aviso
+  en la barra de estado (`1m · 12000 velas (tope)`); por debajo del suelo se
+  ensancha, porque pasar de 1s a 1h conservando cuatro minutos dejaba UNA vela
+  en pantalla. El tope de la API sigue siendo 20.000 por petición: la
+  diferencia se reparte como margen a los lados (mínimo 200 velas) para poder
+  desplazarse un poco sin volver al servidor.
+- Si el tramo pedido **no existe** en el timeframe de destino (2020 en 1s, que
+  empieza en 2024) se cae al comportamiento de siempre —últimas velas, presente—
+  avisando con `sin datos en ese tramo`.
+- Con la ventana en el pasado, el estado dice `pasado · End vuelve`: el
+  streaming NO toca las velas (metería la de ahora detrás de una de 2020) y
+  desplazarse hacia la derecha carga velas nuevas. **End** vuelve al presente
+  conservando el ancho de la ventana.
+- El timeframe y la posición se guardan en `localStorage['btcdash.view']` y se
+  restauran al recargar. Para volver al arranque de fábrica:
+  `localStorage.removeItem('btcdash.view')`.
+
+Atajos de teclado (todos se apagan dentro de un campo de texto; los de una
+sola letra, dentro de cualquier control de formulario):
+
+| Tecla | Efecto |
+| --- | --- |
+| ↑ / ↓ | timeframe siguiente / anterior, conservando la posición |
+| End | volver al presente |
+| Supr | borrar el dibujo seleccionado |
+| Esc | cancelar herramienta, medición o selección |
+| Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y | deshacer / rehacer (100 pasos) |
+| Ctrl+C / Ctrl+V | duplicar el dibujo seleccionado |
+| Alt + arrastrar | duplicar y mover la copia |
+| M | imán |
+| H | ocultar todos los dibujos |
+| L | candado |
+
+Ajustes nuevos de `cfg`: `tfChangeMaxBars` (12000), `tfChangeMinBars` (20),
+`magnetPx` (12). Claves de `localStorage` que usa el frontend:
+`btcdash.view`, `btcdash.toolbarPos`, `btcdash.estiloActual`,
+`btcdash.plantillas`, `btcdash.plantillaDefecto`, `btcdash.iman`,
+`btcdash.dibujosOcultos`, `btcdash.dibujosBloqueados`, más los `cfg.*`.
+
+Estilos y plantillas (`web/src/draw/styles.js`): cualquier cambio de estilo se
+convierte en el defecto de esa herramienta, y una plantilla con nombre es una
+copia guardada de ese mismo estilo. Marcar una plantilla como predeterminada
+**borra la memoria por herramienta**: es una orden de "todo lo nuevo así".
+Vive en el navegador, no en la base de datos.
+
+Deshacer/rehacer (`web/src/draw/history.js`) guarda estados completos y
+reconcilia con el servidor: lo que desaparece se borra y lo que vuelve se
+reescribe. Los cambios de estilo se agrupan medio segundo para que un
+deslizador no deje treinta pasos.
+
+**Dos cosas que se arreglaron por el camino:**
+
+- `GET /api/candles` sin `from` acotaba el escaneo con `to - limit*bucket*3`.
+  Para 12M y 5.000 velas eso son 47.000 años hacia atrás y PostgreSQL tumbaba
+  la query con un 500 (`rows failed`). Ahora hay suelo en epoch 0 y techo en
+  hoy+10 años; lo cubre `TestDeepHistoryRequest`.
+- Trampa 15 del README: LWC guarda la posición como distancia a la ÚLTIMA
+  vela, así que cargar velas por la derecha arrastraba la vista (de marzo de
+  2020 a diciembre de 2025). Hay que volver a fijar el rango tras cada
+  `setData`.
+
+**Limitación conocida:** las velas cargadas se acumulan mientras se pasea por
+el histórico (cada página son 5.000 filas más en memoria del navegador).
+Cambiar de timeframe o recargar limpia. Con paseos largos en 1s conviene
+recargar de vez en cuando.
+
 **Caché del bundle (F2b).** Un deploy no se veía hasta abrir una ventana de
 incógnito: el fichero nuevo estaba en el servidor —el `grep` lo confirmaba—
 pero el navegador seguía sirviendo su copia de `app.js`, la misma URL de
