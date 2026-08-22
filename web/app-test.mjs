@@ -11,6 +11,29 @@ const check = (name, ok, extra = '') => {
   if (!ok) fails.push(name);
 };
 
+
+// La base de datos es la MISMA que usa el usuario (el API local va por el túnel
+// contra jordios): esta suite borra la tabla de dibujos para trabajar en
+// limpio, así que primero se guarda lo que haya y al terminar se repone. Un
+// PUT con el mismo id es upsert, o sea que la restauración es exacta salvo el
+// updated_at. Se repone también si la suite se cae a media ejecución.
+const API = 'http://127.0.0.1:8090';
+const previos = await (await fetch(`${API}/api/drawings`)).json();
+if (previos.length) console.log(`(guardados ${previos.length} dibujos del usuario para reponerlos al final)`);
+async function restaurar() {
+  for (const d of await (await fetch(`${API}/api/drawings`)).json()) {
+    await fetch(`${API}/api/drawings/${d.id}`, { method: 'DELETE' });
+  }
+  for (const d of previos) {
+    await fetch(`${API}/api/drawings/${d.id}`, { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d.payload) });
+  }
+  if (previos.length) console.log(`(repuestos ${previos.length} dibujos del usuario)`);
+}
+for (const ev of ['uncaughtException', 'unhandledRejection']) {
+  process.on(ev, async (e) => { console.error(e); await restaurar(); process.exit(1); });
+}
+
 await page.goto('http://127.0.0.1:8090/');
 await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
 
@@ -525,11 +548,8 @@ check('y a la misma posición', mismoRango(vAntesRecarga, vTrasRecarga, '30m', '
   `${iso(vAntesRecarga.from)}…${iso(vAntesRecarga.to)} → ${iso(vTrasRecarga.from)}…${iso(vTrasRecarga.to)}`);
 await page.evaluate(() => localStorage.removeItem(window.__test.VIEW_KEY));
 
-// limpieza: borra los dibujos de prueba de la BD
-for (const d of await (await fetch('http://127.0.0.1:8090/api/drawings')).json()) {
-  await fetch(`http://127.0.0.1:8090/api/drawings/${d.id}`, { method: 'DELETE' });
-}
-
+// limpieza: fuera los dibujos de prueba, vuelven los del usuario
 await browser.close();
+await restaurar();
 console.log(fails.length ? `\nFALLOS: ${fails.join(', ')}` : '\nTODO OK');
 process.exit(fails.length ? 1 : 0);

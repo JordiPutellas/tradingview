@@ -10,7 +10,7 @@
 // y la conversión a pantalla pasa por el índice lógico, extrapolando fuera
 // del rango de datos para poder dibujar a la derecha de la última vela.
 import { TYPES, DEFAULT_STYLE, drawHandles, drawSelection } from './shapes.js';
-import { HANDLE, dist, rgba, fmtDuration, fmtPrice } from './geom.js';
+import { HANDLE, dist, rgba, fmtDuration, fmtPrice, fmtPct } from './geom.js';
 import { logicalOf as aLogico, timeOfLogical as aTiempo } from '../timemap.js';
 import { Estilos } from './styles.js';
 import { History } from './history.js';
@@ -544,7 +544,12 @@ export class DrawEngine {
       return;
     }
     if ((e.key === 'Delete' || e.key === 'Backspace') && !escribiendo) this.deleteSelected();
-    if (!escribiendo && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    // Los atajos de una sola letra se apagan dentro de CUALQUIER control de
+    // formulario, no solo de los campos de texto: un <select> abierto usa las
+    // letras para buscar entre sus opciones (las plantillas tienen nombre).
+    const enControl = !!el && (el.isContentEditable
+      || ['INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName));
+    if (!enControl && !e.ctrlKey && !e.metaKey && !e.altKey) {
       if (e.key === 'm' || e.key === 'M') { this.setIman(!this.iman); return; }
       if (e.key === 'h' || e.key === 'H') { this.setOcultos(!this.ocultos); return; }
       if (e.key === 'l' || e.key === 'L') { this.setBloqueados(!this.bloqueados); return; }
@@ -825,7 +830,7 @@ export class DrawEngine {
     const barsN = Math.round(Math.abs(this.logicalOf(m.to.t) - this.logicalOf(m.from.t)));
     const secs = Math.abs(m.to.t - m.from.t);
     const txt = [
-      `${d >= 0 ? '+' : '−'}${fmtPrice(Math.abs(d))} (${pct >= 0 ? '+' : '−'}${Math.abs(pct).toFixed(2)}%)`,
+      `${d >= 0 ? '+' : '−'}${fmtPrice(Math.abs(d))} (${pct >= 0 ? '+' : '−'}${fmtPct(Math.abs(pct))}%)`,
       `${barsN} barras · ${fmtDuration(secs)}`,
     ];
     ctx.font = '12px system-ui, sans-serif';

@@ -98,6 +98,7 @@ export function mountPanel(engine, panelEl) {
     rows.text.hidden = !t.text;
     rows.zone.hidden = !t.linked;
     if (t.text) inputs.text.value = s.text || '';
+    rows.tplName.hidden = true;      // el cajetín del nombre no se queda abierto
     pintarPlantillas(inputs.tpl.value);
     panelEl.querySelectorAll('[data-line]').forEach(b => {
       b.classList.toggle('active', Number(b.dataset.line) === engine.activeLine);

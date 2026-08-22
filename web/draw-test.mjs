@@ -16,6 +16,28 @@ const check = (name, ok, extra = '') => {
 };
 const wait = (ms) => page.waitForTimeout(ms);
 
+// La base de datos es la MISMA que usa el usuario (el API local va por el túnel
+// contra jordios): esta suite borra la tabla de dibujos para trabajar en
+// limpio, así que primero se guarda lo que haya y al terminar se repone. Un
+// PUT con el mismo id es upsert, o sea que la restauración es exacta salvo el
+// updated_at. Se repone también si la suite se cae a media ejecución.
+const API = 'http://127.0.0.1:8090';
+const previos = await (await fetch(`${API}/api/drawings`)).json();
+if (previos.length) console.log(`(guardados ${previos.length} dibujos del usuario para reponerlos al final)`);
+async function restaurar() {
+  for (const d of await (await fetch(`${API}/api/drawings`)).json()) {
+    await fetch(`${API}/api/drawings/${d.id}`, { method: 'DELETE' });
+  }
+  for (const d of previos) {
+    await fetch(`${API}/api/drawings/${d.id}`, { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d.payload) });
+  }
+  if (previos.length) console.log(`(repuestos ${previos.length} dibujos del usuario)`);
+}
+for (const ev of ['uncaughtException', 'unhandledRejection']) {
+  process.on(ev, async (e) => { console.error(e); await restaurar(); process.exit(1); });
+}
+
 await page.goto('http://127.0.0.1:8090/');
 await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
 await wait(600);
@@ -39,9 +61,20 @@ const estado = () => page.evaluate(() => {
     figuras: e.shapes.map(s => ({ id: s.id, type: s.type, style: s.style,
       pts: s.points.map(q => ({ t: q.t, p: q.p })) })),
     rango: { from: Math.round(r.from * 100) / 100, to: Math.round(r.to * 100) / 100 },
+    velas: window.__test.getBars().length,
     panel: !document.getElementById('drawPanel').hidden,
   };
 });
+
+// El gráfico "no se ha movido" cuando su rango lógico solo se ha desplazado lo
+// que entraron velas nuevas: LWC guarda la posición como distancia a la última
+// vela (trampa 15), así que cada vela en vivo suma 1 al rango sin que nadie
+// haya paneado. Sin esto, un minuto redondo a mitad de gesto rompía el test.
+const noSeMovio = (a, b) => {
+  const nuevas = b.velas - a.velas;
+  return Math.abs(b.rango.from - nuevas - a.rango.from) < 0.02
+    && Math.abs(b.rango.to - nuevas - a.rango.to) < 0.02;
+};
 
 // Cuenta píxeles por color en el canvas del panel (el mismo lector que F2b).
 const pixeles = () => page.evaluate(() => {
@@ -114,9 +147,8 @@ const dT = rectDespues.pts[0].t - rectAntes.pts[0].t;
 const dP = rectDespues.pts[0].p - rectAntes.pts[0].p;
 check('arrastrar mueve el dibujo en el eje X (tiempo)', dT > 0, `${dT}s`);
 check('arrastrar mueve el dibujo en el eje Y (precio)', dP > 0, `${dP.toFixed(2)} USD`);
-check('arrastrar NO mueve el gráfico',
-  antes.rango.from === despues.rango.from && antes.rango.to === despues.rango.to,
-  `${JSON.stringify(antes.rango)} → ${JSON.stringify(despues.rango)}`);
+check('arrastrar NO mueve el gráfico', noSeMovio(antes, despues),
+  `${JSON.stringify(antes.rango)} → ${JSON.stringify(despues.rango)} (+${despues.velas - antes.velas} velas)`);
 // y el segundo punto se movió lo mismo: la figura se traslada entera
 const d2T = rectDespues.pts[1].t - rectAntes.pts[1].t;
 check('la figura se traslada entera', Math.abs(d2T - dT) <= 1, `p0 ${dT}s vs p1 ${d2T}s`);
@@ -187,14 +219,14 @@ for (const [tool, pts] of HERRAMIENTAS) {
     a0 = await estado();
   }
   if (a0.sel === null) { check(`${tool}: se puede seleccionar con click`, false, 'no seleccionó'); continue; }
+  g = await agarre();          // recalculado justo antes: la escala se mueve sola
   await arrastrar(g.x, g.y, g.x + 130, g.y - 55);
   const a1 = await estado();
   const p0 = a0.figuras[0].pts[0], p1 = a1.figuras[0].pts[0];
   const movX = p1.t - p0.t, movY = p1.p - p0.p;
   check(`${tool}: se arrastra en los DOS ejes y el gráfico no se mueve`,
-    movX > 0 && movY > 0
-    && a0.rango.from === a1.rango.from && a0.rango.to === a1.rango.to,
-    `Δt=${movX}s Δp=${movY.toFixed(2)} · rango ${a0.rango.from}→${a1.rango.from}`);
+    movX > 0 && movY > 0 && noSeMovio(a0, a1),
+    `Δt=${movX}s Δp=${movY.toFixed(2)} · rango ${a0.rango.from}→${a1.rango.from} (+${a1.velas - a0.velas} velas)`);
 }
 await limpiar();
 for (const [tool, pts] of HERRAMIENTAS) await crear(tool, pts);   // repuebla para lo que sigue
@@ -479,7 +511,7 @@ await wait(200);
 // -------------------------------------------------------------- 8. medición
 await page.keyboard.press('Escape');
 await wait(200);
-const rangoAntesMedir = (await estado()).rango;
+const estadoAntesMedir = await estado();
 await page.keyboard.down('Shift');
 await page.mouse.click(500, 500);
 await page.keyboard.up('Shift');
@@ -490,8 +522,7 @@ const medVivo = await page.evaluate(() => window.__test.engine.measureInfo());
 check('shift+click arranca la medición y sigue al cursor',
   medVivo && medVivo.fixed === false && medVivo.bars > 0 && medVivo.delta !== 0,
   medVivo && `Δ${medVivo.delta.toFixed(2)} (${medVivo.pct.toFixed(2)}%) ${medVivo.bars} barras ${medVivo.duration}`);
-check('la medición no desplaza el gráfico',
-  JSON.stringify((await estado()).rango) === JSON.stringify(rangoAntesMedir));
+check('la medición no desplaza el gráfico', noSeMovio(estadoAntesMedir, await estado()));
 const px3 = await pixeles();
 const verdeMedida = Object.entries(px3).filter(([k]) => {
   const [r, g, b] = k.split(',').map(Number);
@@ -784,28 +815,61 @@ await wait(600);
 await limpiar();
 // Un objetivo concreto: el máximo de una vela a la vista, con sus coordenadas
 // según LWC (timeToCoordinate / priceToCoordinate), no según el motor.
+const medirDiana = () => page.evaluate(() => {
+  const { chart, series, engine, getBars } = window.__test;
+  const ts = chart.timeScale();
+  const r = ts.getVisibleLogicalRange();
+  const b = getBars();
+  const rect = engine.paneRect();
+  // Una vela cuyo máximo sea el más alto de su entorno: así el extremo más
+  // cercano a un clic 7 px por encima solo puede ser ESE máximo. Con una vela
+  // cualquiera, la apertura de la de al lado puede quedar más cerca y el imán
+  // haría bien enganchándose a ella, pero el test se quejaría sin razón.
+  // Además tiene que caer en una zona despejada de la pantalla: la barra de
+  // herramientas flota sobre la esquina superior izquierda y se comería el clic.
+  for (let i = Math.max(2, Math.ceil(r.from) + 2); i <= Math.min(b.length - 3, Math.floor(r.to) - 2); i++) {
+    const alto = b[i][2];
+    if (![-2, -1, 1, 2].every(k => b[i + k][2] < alto)) continue;
+    const x = rect.left + ts.timeToCoordinate(b[i][0]);
+    const y = rect.top + series.priceToCoordinate(alto);
+    if (x < 500 || x > rect.right - 60 || y < 150 || y > rect.top + rect.height - 120) continue;
+    return { t: b[i][0], high: alto, i, x, y };
+  }
+  return null;
+});
+// La escala se reajusta sola con cada vela en vivo: se mide hasta que dos
+// lecturas seguidas coinciden, o el clic saldría contra coordenadas viejas.
 const diana = async () => {
   // Acercar primero: con el gráfico alejado una vela mide un píxel y varias
-  // comparten máximo dentro del radio del imán, así que "la vela de al lado"
-  // sería una respuesta igual de buena y el test no podría exigir una.
+  // comparten máximo dentro del radio del imán, así que "la de al lado" sería
+  // una respuesta igual de buena y el test no podría exigir una.
   await page.evaluate(() => {
     const b = window.__test.getBars().length;
     window.__test.chart.timeScale().setVisibleLogicalRange({ from: b - 120, to: b - 1 });
   });
   await wait(600);
-  return page.evaluate(() => {
-  const { chart, series, engine, getBars } = window.__test;
-  const ts = chart.timeScale();
-  const r = ts.getVisibleLogicalRange();
-  const b = getBars();
-  const i = Math.min(b.length - 1, Math.max(0, Math.round((r.from + r.to) / 2)));
-  const vela = b[i];
-  const rect = engine.paneRect();
-  return { t: vela[0], high: vela[2], low: vela[3], open: vela[1], close: vela[4],
-    x: rect.left + ts.timeToCoordinate(vela[0]), y: rect.top + series.priceToCoordinate(vela[2]) };
-  });
+  let a = await medirDiana();
+  for (let i = 0; i < 6; i++) {
+    await wait(250);
+    const b = await medirDiana();
+    if (a && b && b.t === a.t && Math.abs(b.x - a.x) < 1 && Math.abs(b.y - a.y) < 1) return b;
+    a = b;
+  }
+  return a;
 };
+// ¿Sobre qué extremo de qué vela ha caído el punto? (exactamente, no "cerca")
+const sobreExtremo = (pt) => page.evaluate((p) => {
+  const b = window.__test.getBars();
+  const i = b.findIndex(x => x[0] === p.t);
+  if (i < 0) return { ok: false, motivo: 'el tiempo no es el de ninguna vela' };
+  const vals = { apertura: b[i][1], máximo: b[i][2], mínimo: b[i][3], cierre: b[i][4] };
+  const cual = Object.keys(vals).find(k => vals[k] === p.p);
+  return { ok: !!cual, cual, i };
+}, pt);
+
 const d = await diana();
+check('hay una vela con máximo local en zona despejada para probar el imán', !!d,
+  d ? `vela ${d.i} en (${d.x.toFixed(0)}, ${d.y.toFixed(0)})` : 'ninguna');
 await page.click('button[data-tool="__magnet"]');
 await wait(200);
 check('el botón del imán se enciende',
@@ -815,9 +879,10 @@ await page.click('button[data-tool="point"]');
 await page.mouse.click(d.x + 1, d.y - 7);        // 7 px por encima del máximo
 await wait(500);
 const conIman = (await estado()).figuras[0].pts[0];
-check('con el imán, el punto cae EXACTAMENTE en el máximo de la vela',
-  conIman.p === d.high && conIman.t === d.t,
-  `clic a 7 px del máximo ${d.high} → ${conIman.p} (vela ${d.t} vs ${conIman.t})`);
+const enganche = await sobreExtremo(conIman);
+check('con el imán, el punto cae EXACTAMENTE sobre el máximo de una vela',
+  enganche.ok && enganche.cual === 'máximo' && Math.abs(enganche.i - d.i) <= 1,
+  `clic 7 px sobre el máximo ${d.high} (vela ${d.i}) → ${conIman.p} en la ${enganche.i} (${enganche.cual || enganche.motivo})`);
 
 await limpiar();
 await page.keyboard.press('m');                   // atajo de teclado
@@ -828,9 +893,9 @@ await page.click('button[data-tool="point"]');
 await page.mouse.click(d.x + 1, d.y - 7);
 await wait(500);
 const sinIman = (await estado()).figuras[0].pts[0];
+const sinEnganche = await sobreExtremo(sinIman);
 check('sin imán, el punto se queda donde se pinchó',
-  sinIman.p !== d.high && Math.abs(sinIman.p - d.high) > 0.01,
-  `${sinIman.p.toFixed(2)} vs máximo ${d.high}`);
+  !sinEnganche.ok, `${sinIman.p.toFixed(2)} (${sinEnganche.cual || sinEnganche.motivo})`);
 
 // el imán se acuerda entre sesiones
 await page.keyboard.press('m');
@@ -843,7 +908,6 @@ check('el imán se recuerda entre sesiones',
     && document.querySelector('button[data-tool="__magnet"]').classList.contains('active')));
 await page.evaluate(() => window.__test.engine.setIman(false));
 await limpiar();
-
 
 // --------------------------------------------- F4-3.4 ocultar y bloquear
 await limpiar();
@@ -894,7 +958,7 @@ check('con el candado el dibujo no se mueve',
   && Math.abs(trasCandado.figuras[0].pts[0].p - antesCandado.figuras[0].pts[0].p) < 0.01,
   `Δt=${trasCandado.figuras[0].pts[0].t - antesCandado.figuras[0].pts[0].t}`);
 check('y el gesto lo aprovecha el gráfico para desplazarse',
-  Math.abs(trasCandado.rango.from - antesCandado.rango.from) > 1,
+  Math.abs(trasCandado.rango.from - (trasCandado.velas - antesCandado.velas) - antesCandado.rango.from) > 1,
   `${antesCandado.rango.from} → ${trasCandado.rango.from}`);
 check('con el candado tampoco se selecciona', trasCandado.sel === null && !trasCandado.panel);
 await page.keyboard.press('l');
@@ -910,8 +974,7 @@ const antesLibre = await estado();
 await arrastrar(centroLibre.x, centroLibre.y, centroLibre.x + 120, centroLibre.y - 50);
 const trasLibre = await estado();
 check('al quitar el candado vuelve a moverse',
-  trasLibre.figuras[0].pts[0].t > antesLibre.figuras[0].pts[0].t
-  && trasLibre.rango.from === antesLibre.rango.from,
+  trasLibre.figuras[0].pts[0].t > antesLibre.figuras[0].pts[0].t && noSeMovio(antesLibre, trasLibre),
   `Δt=${trasLibre.figuras[0].pts[0].t - antesLibre.figuras[0].pts[0].t}s`);
 
 // los dos interruptores se recuerdan
@@ -987,16 +1050,12 @@ check('Alt + arrastrar duplica y mueve la copia',
   && Math.abs(original.pts[0].t - antesAlt.figuras[0].pts[0].t) < 2
   && copia.pts[0].t > original.pts[0].t && copia.pts[0].p > original.pts[0].p,
   `original quieto (Δt=${original ? original.pts[0].t - antesAlt.figuras[0].pts[0].t : '?'}), copia Δt=${copia ? copia.pts[0].t - original.pts[0].t : '?'}s`);
-check('y el gráfico no se movió', trasAlt.rango.from === antesAlt.rango.from,
-  `${antesAlt.rango.from} → ${trasAlt.rango.from}`);
+check('y el gráfico no se movió', noSeMovio(antesAlt, trasAlt),
+  `${antesAlt.rango.from} → ${trasAlt.rango.from} (+${trasAlt.velas - antesAlt.velas} velas)`);
 await limpiar();
 
 // --------------------------------------------------- 9. limpieza final
-await page.evaluate(async () => {
-  for (const d of await (await fetch('/api/drawings')).json()) {
-    await fetch(`/api/drawings/${d.id}`, { method: 'DELETE' });
-  }
-});
 await browser.close();
+await restaurar();
 console.log(fails.length ? `\nFALLOS: ${fails.join(', ')}` : '\nTODO OK');
 process.exit(fails.length ? 1 : 0);

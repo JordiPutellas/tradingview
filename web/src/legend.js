@@ -8,7 +8,7 @@
 //
 // Los colores son los del usuario (velas alcistas y bajistas), no el
 // verde/rojo de serie.
-import { fmtPrice } from './draw/geom.js';
+import { fmtPrice, fmtPct } from './draw/geom.js';
 
 export function mountLegend({ chart, series, el, getBars, up, down }) {
   let encima = false;
@@ -34,7 +34,7 @@ export function mountLegend({ chart, series, el, getBars, up, down }) {
     el.innerHTML =
       `O <b>${fmtPrice(o)}</b>  H <b>${fmtPrice(h)}</b>  L <b>${fmtPrice(l)}</b>  C <b>${fmtPrice(c)}</b>`
       + `  <span class="var" style="color:${color}">${signo}${fmtPrice(Math.abs(d))}`
-      + ` (${signo}${Math.abs(pct).toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%)</span>`;
+      + ` (${signo}${fmtPct(Math.abs(pct))}%)</span>`;
   }
 
   function ultima() {

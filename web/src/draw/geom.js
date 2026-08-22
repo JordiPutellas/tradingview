@@ -118,6 +118,13 @@ export function fmtDuration(seconds) {
   return parts.filter(p => !/^0/.test(p) || parts.indexOf(p) === 0).slice(0, 2).join(' ');
 }
 
+// Porcentaje con coma decimal, como el precio: mezclar "77.230,00" con
+// "2.55%" en la misma etiqueta se lee fatal.
+export function fmtPct(p) {
+  if (!Number.isFinite(p)) return '—';
+  return p.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 // Precio con los decimales justos para BTC (2) y separador de miles.
 export function fmtPrice(p) {
   if (!Number.isFinite(p)) return '—';

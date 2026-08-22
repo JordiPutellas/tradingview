@@ -376,6 +376,17 @@ configuración). Lo que hay que saber para operarlo:
 - Medición: Shift+click (o el botón 📏) fija el origen, sigue al cursor, un
   click la fija y otro la borra.
 
+⚠️ **Las dos suites trabajan contra la BD REAL** (el API local va por el túnel
+a jordios) y **borran la tabla de dibujos** para empezar en limpio. Guardan lo
+que encuentran al arrancar y lo reponen al terminar —también si se caen a
+media ejecución—, pero el `updated_at` cambia y una interrupción a lo bruto
+(Ctrl+C, cierre del terminal) se lleva los dibujos por delante. Si hay algo que
+no se quiera perder, sacarlo antes:
+
+```bash
+curl -s http://127.0.0.1:8090/api/drawings > /tmp/dibujos.json
+```
+
 Tests (los dos necesitan la API en 127.0.0.1:8090 sirviendo `web/dist`):
 
 ```bash
