@@ -835,6 +835,94 @@ check('el imán se recuerda entre sesiones',
 await page.evaluate(() => window.__test.engine.setIman(false));
 await limpiar();
 
+
+// --------------------------------------------- F4-3.4 ocultar y bloquear
+await limpiar();
+await crear('rect', [[500, 300], [850, 480]]);
+await page.evaluate(() => {
+  const e = window.__test.engine, s = e.shapes[0];
+  s.style.color = '#ff00ff'; s.style.width = 3;
+  s.style.fill = '#ff00ff'; s.style.fillOpacity = 0.5;
+  e.redraw();
+});
+await wait(400);
+await page.mouse.move(20, 780);            // el crosshair fuera del lienzo
+await wait(300);
+const magentaVisible = Object.entries(await pixeles())
+  .filter(([k]) => { const [r, g, b] = k.split(',').map(Number); return r > 150 && b > 150 && g < 90; })
+  .reduce((a, [, v]) => a + v, 0);
+await page.keyboard.press('h');
+await wait(500);
+const pxOculto = await pixeles();
+const magentaOculto = Object.entries(pxOculto)
+  .filter(([k]) => { const [r, g, b] = k.split(',').map(Number); return r > 150 && b > 150 && g < 90; })
+  .reduce((a, [, v]) => a + v, 0);
+check('H oculta todos los dibujos', magentaVisible > 2000 && magentaOculto === 0,
+  `${magentaVisible} → ${magentaOculto} px del dibujo`);
+check('y las velas siguen ahí', cuenta(pxOculto, '112,146,190') + cuenta(pxOculto, '218,218,218') > 1000,
+  `${cuenta(pxOculto, '112,146,190') + cuenta(pxOculto, '218,218,218')} px de vela`);
+check('el dibujo sigue existiendo, solo no se ve', (await estado()).n === 1);
+await page.keyboard.press('h');
+await wait(500);
+const magentaVuelto = Object.entries(await pixeles())
+  .filter(([k]) => { const [r, g, b] = k.split(',').map(Number); return r > 150 && b > 150 && g < 90; })
+  .reduce((a, [, v]) => a + v, 0);
+check('y vuelve a verse al pulsar H otra vez', magentaVuelto > 2000, `${magentaVuelto} px`);
+
+// candado: el dibujo no se mueve y el gesto se lo queda el gráfico
+const centroBloq = await page.evaluate(() => {
+  const e = window.__test.engine, s = e.shapes[0];
+  const pts = e.screenPoints(s), r = e.paneRect();
+  return { x: r.left + (pts[0].x + pts[1].x) / 2, y: r.top + (pts[0].y + pts[1].y) / 2 };
+});
+await page.keyboard.press('l');
+await wait(400);
+const antesCandado = await estado();
+await arrastrar(centroBloq.x, centroBloq.y, centroBloq.x - 180, centroBloq.y + 60);
+const trasCandado = await estado();
+check('con el candado el dibujo no se mueve',
+  Math.abs(trasCandado.figuras[0].pts[0].t - antesCandado.figuras[0].pts[0].t) < 2
+  && Math.abs(trasCandado.figuras[0].pts[0].p - antesCandado.figuras[0].pts[0].p) < 0.01,
+  `Δt=${trasCandado.figuras[0].pts[0].t - antesCandado.figuras[0].pts[0].t}`);
+check('y el gesto lo aprovecha el gráfico para desplazarse',
+  Math.abs(trasCandado.rango.from - antesCandado.rango.from) > 1,
+  `${antesCandado.rango.from} → ${trasCandado.rango.from}`);
+check('con el candado tampoco se selecciona', trasCandado.sel === null && !trasCandado.panel);
+await page.keyboard.press('l');
+await wait(400);
+const centroLibre = await page.evaluate(() => {
+  const e = window.__test.engine, s = e.shapes[0];
+  const pts = e.screenPoints(s), r = e.paneRect();
+  return { x: r.left + (pts[0].x + pts[1].x) / 2, y: r.top + (pts[0].y + pts[1].y) / 2 };
+});
+await page.mouse.click(centroLibre.x, centroLibre.y);
+await wait(300);
+const antesLibre = await estado();
+await arrastrar(centroLibre.x, centroLibre.y, centroLibre.x + 120, centroLibre.y - 50);
+const trasLibre = await estado();
+check('al quitar el candado vuelve a moverse',
+  trasLibre.figuras[0].pts[0].t > antesLibre.figuras[0].pts[0].t
+  && trasLibre.rango.from === antesLibre.rango.from,
+  `Δt=${trasLibre.figuras[0].pts[0].t - antesLibre.figuras[0].pts[0].t}s`);
+
+// los dos interruptores se recuerdan
+await page.evaluate(() => { window.__test.engine.setOcultos(true); window.__test.engine.setBloqueados(true); });
+await page.reload();
+await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
+await wait(700);
+check('ocultar y bloquear se recuerdan entre sesiones',
+  await page.evaluate(() => window.__test.engine.ocultos === true && window.__test.engine.bloqueados === true
+    && document.querySelector('button[data-tool="__hide"]').classList.contains('active')
+    && document.querySelector('button[data-tool="__lock"]').classList.contains('active')));
+// elegir herramienta con los dibujos ocultos los enseña: dibujar a ciegas, no
+await page.click('button[data-tool="trend"]');
+await wait(300);
+check('elegir una herramienta deja de ocultar los dibujos',
+  await page.evaluate(() => window.__test.engine.ocultos === false));
+await page.keyboard.press('Escape');
+await page.evaluate(() => { window.__test.engine.setOcultos(false); window.__test.engine.setBloqueados(false); });
+await limpiar();
+
 // --------------------------------------------------- 9. limpieza final
 await page.evaluate(async () => {
   for (const d of await (await fetch('/api/drawings')).json()) {

@@ -485,6 +485,8 @@ function sincronizarBotones() {
   document.querySelectorAll('.tools button').forEach(b => {
     const t = b.dataset.tool;
     if (t === '__magnet') b.classList.toggle('active', engine.iman);
+    else if (t === '__hide') b.classList.toggle('active', engine.ocultos);
+    else if (t === '__lock') b.classList.toggle('active', engine.bloqueados);
     else b.classList.toggle('active', t === activa);
   });
 }
@@ -543,6 +545,8 @@ document.querySelectorAll('.tools button').forEach(b => {
     if (t === '__clear') { engine.deleteSelected(); return; }
     if (t === '__measure') { engine.armMeasure(); return; }
     if (t === '__magnet') { b.blur(); engine.setIman(!engine.iman); return; }
+    if (t === '__hide') { b.blur(); engine.setOcultos(!engine.ocultos); return; }
+    if (t === '__lock') { b.blur(); engine.setBloqueados(!engine.bloqueados); return; }
     engine.setTool(engine.activeTool() === t ? null : t);
   };
 });

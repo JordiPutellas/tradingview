@@ -18,8 +18,10 @@ import { History } from './history.js';
 const PERSIST_MS = 400;
 const uuid = () => crypto.randomUUID();
 
-// Ajustes que viven en el navegador (como la posición de la barra): el imán.
+// Ajustes que viven en el navegador, como la posición de la barra.
 const FLAG_IMAN = 'btcdash.iman';
+const FLAG_OCULTOS = 'btcdash.dibujosOcultos';
+const FLAG_BLOQUEADOS = 'btcdash.dibujosBloqueados';
 
 export class DrawEngine {
   constructor({ chart, series, container, getBars, getStep, onSave, onDelete, onSelect,
@@ -35,7 +37,9 @@ export class DrawEngine {
     this.autoscaleWithShapes = autoscaleWithShapes || (() => false);
     this.magnetPx = magnetPx || (() => 12);
     this.onFlags = onFlags || (() => {});
-    this.iman = localStorage.getItem(FLAG_IMAN) === '1';   // F4-3.3
+    this.iman = localStorage.getItem(FLAG_IMAN) === '1';               // F4-3.3
+    this.ocultos = localStorage.getItem(FLAG_OCULTOS) === '1';         // F4-3.4
+    this.bloqueados = localStorage.getItem(FLAG_BLOQUEADOS) === '1';
 
     this.shapes = [];
     this.estilos = new Estilos();           // estilo por defecto y plantillas (F4-2)
@@ -214,7 +218,9 @@ export class DrawEngine {
       measure: (t, size) => { ctx.font = `${size}px system-ui, sans-serif`; return ctx.measureText(t).width; },
     };
     ctx.save();
-    for (const s of this.shapes) {
+    // Ocultos: se salta el dibujo entero, pero la medición se sigue pintando
+    // (es una herramienta del momento, no un dibujo guardado).
+    if (!this.ocultos) for (const s of this.shapes) {
       const pts = this.screenPoints(s);
       if (!pts) continue;
       if (s.id === this.selectedId) drawSelection(ctx, s, pts, env);
@@ -228,7 +234,7 @@ export class DrawEngine {
         if (pts) { ctx.globalAlpha = 0.7; TYPES[prev.type].draw(ctx, prev, pts, env); ctx.globalAlpha = 1; }
       }
     }
-    const sel = this.selected();
+    const sel = this.ocultos ? null : this.selected();
     if (sel) {
       const pts = this.screenPoints(sel);
       if (pts) drawHandles(ctx, TYPES[sel.type].handles(pts));
@@ -303,6 +309,7 @@ export class DrawEngine {
   }
 
   _shapeAt(x, y) {
+    if (this.inertes) return null;
     const env = { measure: (t, size) => measureText(t, size) };
     for (let i = this.shapes.length - 1; i >= 0; i--) {   // el de arriba manda
       const s = this.shapes[i];
@@ -313,6 +320,7 @@ export class DrawEngine {
   }
 
   _handleAt(x, y) {
+    if (this.inertes) return -1;
     const s = this.selected();
     if (!s) return -1;
     const pts = this.screenPoints(s);
@@ -415,6 +423,29 @@ export class DrawEngine {
     this.onFlags(this);
   }
 
+  // ---------- ocultar y bloquear (F4-3.4) ----------
+  // Ocultos: no se pintan ni se pueden tocar — el precio, limpio.
+  // Bloqueados: se ven pero son inertes; el ratón atraviesa y el gráfico se
+  // desplaza como si no estuvieran, que es de lo que protege el candado.
+  setOcultos(on) {
+    this.ocultos = !!on;
+    localStorage.setItem(FLAG_OCULTOS, this.ocultos ? '1' : '0');
+    if (this.ocultos) this._select(null);
+    this.onFlags(this);
+    this.redraw();
+  }
+
+  setBloqueados(on) {
+    this.bloqueados = !!on;
+    localStorage.setItem(FLAG_BLOQUEADOS, this.bloqueados ? '1' : '0');
+    if (this.bloqueados) this._select(null);
+    this.onFlags(this);
+    this.redraw();
+  }
+
+  // Ni selección ni arrastre ni hit-test mientras estén ocultos o bloqueados.
+  get inertes() { return this.ocultos || this.bloqueados; }
+
   static valido(s) {
     return Array.isArray(s.points) && s.points.length > 0
       && s.points.every(q => Number.isFinite(q.t) && Number.isFinite(q.p));
@@ -511,9 +542,10 @@ export class DrawEngine {
       return;
     }
     if ((e.key === 'Delete' || e.key === 'Backspace') && !escribiendo) this.deleteSelected();
-    if (!escribiendo && !e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'm' || e.key === 'M')) {
-      this.setIman(!this.iman);
-      return;
+    if (!escribiendo && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (e.key === 'm' || e.key === 'M') { this.setIman(!this.iman); return; }
+      if (e.key === 'h' || e.key === 'H') { this.setOcultos(!this.ocultos); return; }
+      if (e.key === 'l' || e.key === 'L') { this.setBloqueados(!this.bloqueados); return; }
     }
     // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y. Escribiendo en un campo manda el
     // deshacer del navegador, que es lo que espera cualquiera.
@@ -541,6 +573,7 @@ export class DrawEngine {
   // ---------- creación ----------
   setTool(type) {
     this.armed = false;              // elegir herramienta cancela el modo medir
+    if (type && this.ocultos) this.setOcultos(false);   // dibujar a ciegas, no
     this.pending = type ? { type, pts: [] } : null;
     this.container.style.cursor = type ? 'crosshair' : '';
     // Al empezar a dibujar se deselecciona: si no, el panel de configuración
