@@ -13,6 +13,7 @@ import { TYPES, DEFAULT_STYLE, drawHandles, drawSelection } from './shapes.js';
 import { HANDLE, dist, rgba, fmtDuration, fmtPrice } from './geom.js';
 import { logicalOf as aLogico, timeOfLogical as aTiempo } from '../timemap.js';
 import { Estilos } from './styles.js';
+import { History } from './history.js';
 
 const PERSIST_MS = 400;
 const uuid = () => crypto.randomUUID();
@@ -31,6 +32,7 @@ export class DrawEngine {
 
     this.shapes = [];
     this.estilos = new Estilos();           // estilo por defecto y plantillas (F4-2)
+    this.history = new History(100);        // deshacer / rehacer (F4-3.1)
     this.selectedId = null;
     this.activeLine = 0;                    // en zone2, qué línea edita el panel
     this.pending = null;                    // creación en curso
@@ -44,7 +46,51 @@ export class DrawEngine {
 
     this._installPrimitive();
     this._installEvents();
+    this.history.init(this._state());
   }
+
+  // ---------- deshacer / rehacer (F4-3.1) ----------
+  _state() {
+    return JSON.stringify(this.shapes.map(s => ({ id: s.id, ...this.toJSON(s) })));
+  }
+
+  // Cambios estructurales (crear, borrar, soltar un arrastre): entrada propia.
+  _commit() {
+    clearTimeout(this._histTimer);
+    this.history.commit(this._state());
+  }
+
+  // Cambios de estilo: un deslizador dispara decenas de eventos por segundo y
+  // no puede dejar decenas de pasos que deshacer uno a uno.
+  _commitSoon() {
+    clearTimeout(this._histTimer);
+    this._histTimer = setTimeout(() => this.history.commit(this._state()), 500);
+  }
+
+  _apply(json) {
+    const destino = JSON.parse(json);
+    const vivos = new Set(destino.map(o => o.id));
+    for (const s of this.shapes) {
+      if (vivos.has(s.id)) continue;
+      clearTimeout(this.timers.get(s.id));     // el guardado diferido resucitaría la figura
+      this.timers.delete(s.id);
+      this.onDelete(s.id);
+    }
+    this.shapes = destino.map(o => ({
+      id: o.id, type: o.type,
+      points: o.points.map(p => ({ t: p.t, p: p.p })),
+      style: { ...DEFAULT_STYLE, ...o.style },
+      ...(o.style2 ? { style2: { ...DEFAULT_STYLE, ...o.style2 } } : {}),
+      ...(o.text !== undefined ? { text: o.text } : {}),
+    }));
+    if (!this.shapes.some(s => s.id === this.selectedId)) this.selectedId = null;
+    for (const s of this.shapes) this.save(s);  // reescribe el servidor con lo que toca
+    this.onSelect(this.selected(), this);
+    this.redraw();
+  }
+
+  undo() { const st = this.history.undo(); if (st !== null) this._apply(st); return st !== null; }
+  redo() { const st = this.history.redo(); if (st !== null) this._apply(st); return st !== null; }
 
   // ---------- conversión (tiempo, precio) <-> pantalla ----------
   // Se pasa por el índice lógico porque timeToCoordinate solo resuelve
@@ -391,7 +437,7 @@ export class DrawEngine {
     if (!this.drag) return;
     const s = this.selected();
     this.drag = null;
-    if (s) this.save(s);
+    if (s) { this.save(s); this._commit(); }   // mover y redimensionar se deshacen
   }
 
   _onMoveHover(e) {
@@ -416,6 +462,16 @@ export class DrawEngine {
       return;
     }
     if ((e.key === 'Delete' || e.key === 'Backspace') && !escribiendo) this.deleteSelected();
+    // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y. Escribiendo en un campo manda el
+    // deshacer del navegador, que es lo que espera cualquiera.
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && !escribiendo && (e.key === 'z' || e.key === 'Z')) {
+      e.preventDefault();
+      if (e.shiftKey) this.redo(); else this.undo();
+    } else if (mod && !escribiendo && (e.key === 'y' || e.key === 'Y')) {
+      e.preventDefault();
+      this.redo();
+    }
   }
 
   // Mientras arrastramos un dibujo, el gráfico no se desplaza ni con el ratón
@@ -482,6 +538,7 @@ export class DrawEngine {
     this.shapes.push(s);
     this.redraw();
     this.save(s);
+    this._commit();
     return s;
   }
 
@@ -527,6 +584,7 @@ export class DrawEngine {
     this.estilos.recordar(s.type, s.style, s.style2);
     this.redraw();
     this.save(s);
+    this._commitSoon();
   }
 
   // ---------- plantillas de estilo (F4-2.2) ----------
@@ -542,6 +600,7 @@ export class DrawEngine {
     this.redraw();
     this.save(s);
     this.onSelect(s, this);
+    this._commitSoon();
     return true;
   }
 
@@ -557,6 +616,7 @@ export class DrawEngine {
     s.text = text;
     this.redraw();
     this.save(s);
+    this._commitSoon();
   }
 
   deleteSelected() { this.remove(this.selectedId); }
@@ -573,6 +633,7 @@ export class DrawEngine {
     this.onDelete(id);
     this.onSelect(this.selected(), this);
     this.redraw();
+    this._commit();
   }
 
   clear() { for (const s of [...this.shapes]) this.remove(s.id); }
@@ -611,6 +672,7 @@ export class DrawEngine {
       });
     }
     this.redraw();
+    this.history.init(this._state());   // deshacer no puede llegar a antes de cargar
   }
 
   // ---------- medición ----------

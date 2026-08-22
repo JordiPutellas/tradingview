@@ -654,6 +654,122 @@ await page.evaluate(() => {
 });
 await limpiar();
 
+
+// ------------------------------------------------------ F4-3.1 deshacer/rehacer
+await limpiar();
+const nFiguras = () => page.evaluate(() => window.__test.engine.shapes.length);
+const enBD = () => page.evaluate(() => fetch('/api/drawings').then(r => r.json()).then(d => d.length));
+
+// crear → deshacer → rehacer
+await crear('rect', [[500, 300], [800, 450]]);
+const uCrear = await estado();
+await page.keyboard.press('Control+z');
+await wait(500);
+const trasDeshacerCrear = await nFiguras();
+await page.keyboard.press('Control+Shift+z');
+await wait(600);
+const uRehacer = await estado();
+check('Ctrl+Z deshace la creación', uCrear.n === 1 && trasDeshacerCrear === 0,
+  `${uCrear.n} → ${trasDeshacerCrear}`);
+check('Ctrl+Shift+Z la rehace con su sitio y su estilo',
+  uRehacer.n === 1 && uRehacer.figuras[0].pts[0].t === uCrear.figuras[0].pts[0].t
+  && uRehacer.figuras[0].style.color === uCrear.figuras[0].style.color,
+  JSON.stringify(uRehacer.figuras[0].pts[0]));
+await wait(700);
+check('y el servidor se entera del deshacer', (await enBD()) === 1, `${await enBD()} filas`);
+
+// mover → deshacer (gesto real de arrastre)
+const centroR = () => page.evaluate(() => {
+  const e = window.__test.engine, s = e.shapes[0];
+  const pts = e.screenPoints(s), r = e.paneRect();
+  return { x: r.left + (pts[0].x + pts[1].x) / 2, y: r.top + (pts[0].y + pts[1].y) / 2 };
+});
+let c = await centroR();
+await page.mouse.click(c.x, c.y);
+await wait(300);
+const uAntesMover = (await estado()).figuras[0].pts[0];
+await arrastrar(c.x, c.y, c.x + 150, c.y - 70);
+const uMover = (await estado()).figuras[0].pts[0];
+await page.keyboard.press('Control+z');
+await wait(600);
+const trasDeshacerMover = (await estado()).figuras[0].pts[0];
+check('Ctrl+Z deshace un arrastre',
+  uMover.t > uAntesMover.t && Math.abs(trasDeshacerMover.t - uAntesMover.t) < 2
+  && Math.abs(trasDeshacerMover.p - uAntesMover.p) < 0.01,
+  `${uAntesMover.t} → ${uMover.t} → ${trasDeshacerMover.t}`);
+
+// redimensionar → deshacer
+c = await centroR();
+await page.mouse.click(c.x, c.y);
+await wait(300);
+const handleR = await page.evaluate(() => {
+  const e = window.__test.engine, s = e.shapes[0];
+  const pts = e.screenPoints(s), r = e.paneRect();
+  return { x: r.left + pts[1].x, y: r.top + pts[1].y };
+});
+const antesRedim = (await estado()).figuras[0].pts[1];
+await arrastrar(handleR.x, handleR.y, handleR.x + 100, handleR.y + 60);
+const trasRedim = (await estado()).figuras[0].pts[1];
+await page.keyboard.press('Control+z');
+await wait(600);
+const trasDeshacerRedim = (await estado()).figuras[0].pts[1];
+check('Ctrl+Z deshace un redimensionado',
+  Math.abs(trasRedim.t - antesRedim.t) > 1 && Math.abs(trasDeshacerRedim.t - antesRedim.t) < 2,
+  `${antesRedim.t} → ${trasRedim.t} → ${trasDeshacerRedim.t}`);
+
+// estilo → deshacer (y se ve en el lienzo)
+c = await centroR();
+await page.mouse.click(c.x, c.y);
+await wait(300);
+const colorAntes = (await estado()).figuras[0].style.color;
+await ponEstilo('color', '#ff00aa');
+await wait(900);                                   // el estilo se agrupa 500 ms
+const pxRosa = cuenta(await pixeles(), '255,0,170');
+await page.keyboard.press('Control+z');
+await wait(700);
+const colorTras = (await estado()).figuras[0].style.color;
+const pxRosaTras = cuenta(await pixeles(), '255,0,170');
+check('Ctrl+Z deshace un cambio de estilo y se ve en el lienzo',
+  colorTras === colorAntes && pxRosa > 100 && pxRosaTras === 0,
+  `${colorAntes} → #ff00aa (${pxRosa} px) → ${colorTras} (${pxRosaTras} px)`);
+
+// borrar → deshacer
+c = await centroR();
+await page.mouse.click(c.x, c.y);
+await wait(300);
+await page.keyboard.press('Delete');
+await wait(400);
+const trasBorrarUndo = await nFiguras();
+await page.keyboard.press('Control+z');
+await wait(600);
+check('Ctrl+Z deshace un borrado', trasBorrarUndo === 0 && (await nFiguras()) === 1,
+  `${trasBorrarUndo} → ${await nFiguras()}`);
+// Ctrl+Y como alternativa a Ctrl+Shift+Z
+await page.keyboard.press('Control+z');
+await wait(500);
+await page.keyboard.press('Control+y');
+await wait(600);
+check('Ctrl+Y rehace igual que Ctrl+Shift+Z', (await nFiguras()) === 1);
+
+// profundidad: 55 pasos hacia atrás
+await limpiar();
+await page.evaluate(() => {
+  const { engine, getBars } = window.__test;
+  const b = getBars();
+  for (let i = 0; i < 55; i++) {
+    engine.addShape('point', [{ t: b[b.length - 200 + i][0], p: b[b.length - 1][4] * (1 + i / 1000) }]);
+  }
+});
+await wait(400);
+const antesPila = await nFiguras();
+for (let i = 0; i < 52; i++) { await page.keyboard.press('Control+z'); await wait(30); }
+await wait(800);
+const trasPila = await nFiguras();
+check('el historial aguanta más de 50 pasos', antesPila === 55 && trasPila === 3,
+  `${antesPila} → ${trasPila} figuras tras 52 deshacer`);
+await limpiar();
+await wait(600);
+
 // --------------------------------------------------- 9. limpieza final
 await page.evaluate(async () => {
   for (const d of await (await fetch('/api/drawings')).json()) {
