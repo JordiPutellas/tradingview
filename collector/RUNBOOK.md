@@ -347,9 +347,11 @@ el histórico crece solo al desplazarse al pasado, se puede seguir alejando.
 También se baja `minBarSpacing` a 0,05 (0,5 por defecto): con el valor de
 fábrica solo caben ~2.600 velas y, al pedir más, LWC recortaba el ancho de la
 ventana pero respetaba su posición.
-El autoajuste ignora los dibujos anulando el `autoscaleInfo` de cada primitive
-del plugin, que por defecto devuelve el rango de sus anclas. La posición de la
-barra de dibujo flotante se guarda en `localStorage['btcdash.toolbarPos']`.
+El autoajuste ignora los dibujos anulando el `autoscaleInfo` de cada primitive,
+que por defecto devuelve el rango de sus anclas. La barra de dibujo **ya no
+flota**: desde F4b es una columna fija en el lateral izquierdo que ocupa sitio
+en el layout (`#main` = barra + gráfico), así que no puede tapar el precio y no
+hay posición que recordar; `btcdash.toolbarPos` se borra al arrancar.
 
 **Dibujos (F3).** Motor propio en `web/src/draw/` sobre la API de primitives
 de LWC v5; el plugin `lightweight-charts-drawing` se retiró (el porqué, con
@@ -385,6 +387,14 @@ no se quiera perder, sacarlo antes:
 
 ```bash
 curl -s http://127.0.0.1:8090/api/drawings > /tmp/dibujos.json
+```
+
+Chromium de Playwright necesita `libnss3`/`libnspr4` y en este portátil no
+están instaladas en el sistema (ni hay sudo). Las suites se las buscan solas en
+`~/.cache/playwright-sys-libs`; para dejarlas ahí:
+
+```bash
+mkdir -p ~/.cache/playwright-sys-libs && cd $_ && apt-get download libnss3 libnspr4 && for d in *.deb; do dpkg-deb -x $d .; done && rm -f *.deb
 ```
 
 Tests (los dos necesitan la API en 127.0.0.1:8090 sirviendo `web/dist`):
