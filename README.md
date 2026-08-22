@@ -208,7 +208,7 @@ hit-test de cada figura son nuestros.
 - **RF-5.20** (F4) El último estilo aplicado pasa a ser el **defecto de esa herramienta**, y hay **plantillas con nombre**: guardar, aplicar a un dibujo ya existente, marcar una como predeterminada y borrarla. Son el mismo sistema: el estilo actual es una plantilla implícita
 - **RF-5.21** (F4) **Deshacer / rehacer** (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y) sobre crear, borrar, mover, redimensionar y cambiar estilo; 100 pasos de historial
 - **RF-5.22** (F4) **Legend** arriba a la izquierda con open, high, low, close y variación (absoluta y porcentual, contra el cierre anterior) de la vela bajo el cursor, con la paleta del usuario
-- **RF-5.23** (F4) **Imán** (botón o `M`) que engancha el punto al máximo/mínimo/apertura/cierre de la vela más cercana dentro de `cfg.magnetPx`; **ocultar** todos los dibujos (`H`) y **candado** global (`L`), ambos recordados entre sesiones; **duplicar** con Ctrl+C/Ctrl+V o Alt+arrastrar
+- **RF-5.23** (F4) **Imán** (botón o `M`) que engancha el punto al máximo/mínimo/apertura/cierre de la vela más cercana dentro de `cfg.magnetPx`; **ocultar** todos los dibujos (`H`), **candado** global (`L`) y **quitar el crosshair** (`X`, líneas y etiquetas de los ejes), los tres recordados entre sesiones; **duplicar** con Ctrl+C/Ctrl+V o Alt+arrastrar
 
 ### RF-6 — Operación
 

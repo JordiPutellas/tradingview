@@ -36,6 +36,10 @@ for (const ev of ['uncaughtException', 'unhandledRejection']) {
 
 await page.goto('http://127.0.0.1:8090/');
 await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
+// Los dibujos que haya en la BD son del usuario y se pintarían encima de las
+// comprobaciones de píxeles (una zona de dos niveles cruza el lienzo entero).
+// Se ocultan con el interruptor de F4-3.4, que no toca la base de datos.
+await page.evaluate(() => window.__test.engine.setOcultos(true));
 
 // 1. carga inicial
 const n0 = await page.evaluate(() => window.__test.getBars().length);
@@ -102,8 +106,13 @@ await page.waitForFunction(() => window.__test.getTF().name === '1s' && window._
 check('con la ventana en el pasado el frontend lo sabe',
   (await page.evaluate(() => window.__test.isLive())) === false);
 await page.keyboard.press('End');
-await page.waitForFunction(() => window.__test.isLive() === true, { timeout: 20000 });
-await page.waitForTimeout(1200);
+// isLive() se pone a true al EMPEZAR la carga, así que no vale como señal por
+// sí solo: hay que esperar a que las velas estén y lleguen hasta hoy.
+await page.waitForFunction(() => {
+  const b = window.__test.getBars();
+  return window.__test.isLive() && b.length > 100 && Date.now() / 1000 - b[b.length - 1][0] < 120;
+}, { timeout: 30000 });
+await page.waitForTimeout(800);
 check('End vuelve al presente',
   (await page.evaluate(() => Date.now() / 1000 - window.__test.getBars().at(-1)[0])) < 10,
   `${(await page.evaluate(() => Date.now() / 1000 - window.__test.getBars().at(-1)[0])).toFixed(1)}s de antigüedad`);
@@ -203,6 +212,60 @@ check('crosshair sólido (no discontinuo)', cross.run > cross.alto * 0.9,
   `tramo continuo ${cross.run}/${cross.alto} px`);
 check('crosshair de 1 px de ancho', cross.columnas === 1, `${cross.columnas} columnas completas`);
 await page.mouse.move(20, 780); // fuera del gráfico: quita el crosshair
+
+// 10e. F4 — el crosshair se puede quitar (tecla X o botón de la barra)
+const cruzPx = () => page.evaluate(() => {
+  const cs = [...document.querySelectorAll('#chart canvas')];
+  const area = Math.max(...cs.map(c => c.width * c.height));
+  let total = 0;
+  for (const c of cs) {
+    if (c.width * c.height < area * 0.9) continue;
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i] === 30 && d[i + 1] === 30 && d[i + 2] === 30 && d[i + 3] === 255) total++;
+    }
+  }
+  return total;
+});
+const legendC = () => page.evaluate(() => {
+  const m = document.getElementById('legend').textContent.match(/C ([\d.,]+)/);
+  return m ? parseFloat(m[1].replace(/\./g, '').replace(',', '.')) : null;
+});
+await page.mouse.move(700, 400);
+await page.waitForTimeout(400);
+const cruzAntes = await cruzPx();
+const legConCruz = await legendC();
+await page.keyboard.press('x');
+await page.waitForTimeout(300);
+await page.mouse.move(701, 401);
+await page.waitForTimeout(400);
+const cruzQuitada = await cruzPx();
+check('la tecla X quita el crosshair del lienzo', cruzAntes > 100 && cruzQuitada === 0,
+  `${cruzAntes} → ${cruzQuitada} px`);
+check('y el botón de la barra queda encendido',
+  await page.evaluate(() => document.querySelector('button[data-tool="__cross"]').classList.contains('active')));
+check('sin crosshair, la legend sigue siguiendo al cursor',
+  (await legendC()) !== null && Math.abs((await legendC()) - legConCruz) < 500,
+  `cierre ${legConCruz} → ${await legendC()}`);
+// y tampoco quedan etiquetas del crosshair colgando en los ejes
+check('las etiquetas del crosshair en los ejes también se van',
+  await page.evaluate(() => {
+    const o = window.__test.chart.options().crosshair;
+    return o.vertLine.labelVisible === false && o.horzLine.labelVisible === false;
+  }));
+await page.reload();
+await page.waitForFunction(() => window.__test && window.__test.getBars().length > 100, { timeout: 30000 });
+await page.mouse.move(700, 400);
+await page.waitForTimeout(600);
+check('el interruptor del crosshair se recuerda entre sesiones',
+  (await cruzPx()) === 0 && (await page.evaluate(() => window.__test.sinCrosshair())) === true);
+await page.click('button[data-tool="__cross"]');
+await page.mouse.move(702, 402);
+await page.waitForTimeout(500);
+const cruzVuelta = await cruzPx();
+check('el botón lo vuelve a poner', cruzVuelta > 100, `${cruzVuelta} px`);
+await page.evaluate(() => localStorage.removeItem('btcdash.sinCrosshair'));
+
 
 // 10b. F2b — el volumen ya no está
 const seriesCount = await page.evaluate(() => window.__test.chart.panes()[0].getSeries().length);
@@ -601,6 +664,10 @@ check('y a la misma posición', mismoRango(vAntesRecarga, vTrasRecarga, '30m', '
 await page.evaluate(() => localStorage.removeItem(window.__test.VIEW_KEY));
 
 // limpieza: fuera los dibujos de prueba, vuelven los del usuario
+await page.evaluate(() => {
+  window.__test.engine.setOcultos(false);
+  localStorage.removeItem('btcdash.dibujosOcultos');
+});
 await browser.close();
 await restaurar();
 console.log(fails.length ? `\nFALLOS: ${fails.join(', ')}` : '\nTODO OK');

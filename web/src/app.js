@@ -59,7 +59,16 @@ window.cfg = {
 // Paleta de las velas: cuerpo, borde y mecha del mismo color (sin outline).
 const UP = '#7092be', DOWN = '#dadada';
 // Crosshair: sólido, oscuro y de 1 px (el defecto de LWC es discontinuo y claro).
+// Se puede quitar del todo —líneas y etiquetas de los ejes— con el botón de la
+// barra o con la tecla X; el interruptor se recuerda entre sesiones.
 const CROSSHAIR = '#1e1e1e';
+const CROSS_KEY = 'btcdash.sinCrosshair';
+let sinCrosshair = localStorage.getItem(CROSS_KEY) === '1';
+function crosshairOpts() {
+  const linea = { color: CROSSHAIR, width: 1, style: 0, labelBackgroundColor: CROSSHAIR,
+    visible: !sinCrosshair, labelVisible: !sinCrosshair };
+  return { mode: 0, vertLine: { ...linea }, horzLine: { ...linea } };   // 0 = libre, no engancha a la vela
+}
 
 // ---------- timeframes ----------
 // Anclajes idénticos a los de la API: semanas/3D/5D sobre 2018-01-01 (lunes),
@@ -137,11 +146,7 @@ const chart = createChart(container, {
     borderColor: '#4a4a4a',
     scaleMargins: { top: CONFIG.priceMarginTop, bottom: CONFIG.priceMarginBottom },
   },
-  crosshair: {
-    mode: 0, // libre, no engancha a la vela
-    vertLine: { color: CROSSHAIR, width: 1, style: 0, labelBackgroundColor: CROSSHAIR },
-    horzLine: { color: CROSSHAIR, width: 1, style: 0, labelBackgroundColor: CROSSHAIR },
-  },
+  crosshair: crosshairOpts(),
   // El zoom de rueda lo hacemos nosotros (más abajo): el nativo es muy corto.
   handleScale: { mouseWheel: false },
 });
@@ -509,6 +514,15 @@ const engine = new DrawEngine({
   onSelect: () => sincronizarBotones(),
 });
 
+// Quitar o poner el crosshair. Encendido = modo raro (sin crosshair), igual
+// que el resto de interruptores de la barra.
+function setCrosshair(quitado) {
+  sinCrosshair = !!quitado;
+  localStorage.setItem(CROSS_KEY, sinCrosshair ? '1' : '0');
+  chart.applyOptions({ crosshair: crosshairOpts() });
+  sincronizarBotones();
+}
+
 // Estado visible de la barra de herramientas: la herramienta activa y los
 // interruptores que no son herramientas (imán).
 function sincronizarBotones() {
@@ -518,6 +532,7 @@ function sincronizarBotones() {
     if (t === '__magnet') b.classList.toggle('active', engine.iman);
     else if (t === '__hide') b.classList.toggle('active', engine.ocultos);
     else if (t === '__lock') b.classList.toggle('active', engine.bloqueados);
+    else if (t === '__cross') b.classList.toggle('active', sinCrosshair);
     else b.classList.toggle('active', t === activa);
   });
 }
@@ -561,6 +576,15 @@ addEventListener('keydown', (e) => {
   if (i >= 0 && i < TFS.length) loadTF(TFS[i], { mismasVelas: true });
 });
 
+// X: quitar o poner el crosshair.
+addEventListener('keydown', (e) => {
+  if (e.key !== 'x' && e.key !== 'X') return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const el = document.activeElement;
+  if (el && (el.isContentEditable || ['INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName))) return;
+  setCrosshair(!sinCrosshair);
+});
+
 // End: volver al presente conservando el ancho de la ventana. Con 1.1 y 1.3 se
 // puede acabar en 2020 y quedarse ahí también al recargar; hace falta una
 // salida que no sea desplazarse a mano cinco años.
@@ -580,6 +604,7 @@ document.querySelectorAll('.tools button').forEach(b => {
     if (t === '__magnet') { b.blur(); engine.setIman(!engine.iman); return; }
     if (t === '__hide') { b.blur(); engine.setOcultos(!engine.ocultos); return; }
     if (t === '__lock') { b.blur(); engine.setBloqueados(!engine.bloqueados); return; }
+    if (t === '__cross') { b.blur(); setCrosshair(!sinCrosshair); return; }
     engine.setTool(engine.activeTool() === t ? null : t);
   };
 });
@@ -671,5 +696,6 @@ addEventListener('resize', () => {
 // hooks de test (DST, streaming) — sin efecto en producción
 window.__test = { bucketStart, fmtTick, fmtFull, TFS, loadTF, chart, series,
   getBars: () => bars, getTF: () => tf, CONFIG, tfsEl, toolsEl, engine,
-  panelEl: $('#drawPanel'),
-  visibleTimeRange, vistaGuardada, VIEW_KEY, isLive: () => liveEdge };
+  panelEl: $('#drawPanel'), legendEl: $('#legend'), legend,
+  visibleTimeRange, vistaGuardada, VIEW_KEY, isLive: () => liveEdge,
+  sinCrosshair: () => sinCrosshair, setCrosshair };

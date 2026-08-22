@@ -443,12 +443,14 @@ sola letra, dentro de cualquier control de formulario):
 | M | imán |
 | H | ocultar todos los dibujos |
 | L | candado |
+| X | quitar o poner el crosshair |
 
 Ajustes nuevos de `cfg`: `tfChangeMaxBars` (12000), `tfChangeMinBars` (20),
 `magnetPx` (12). Claves de `localStorage` que usa el frontend:
 `btcdash.view`, `btcdash.toolbarPos`, `btcdash.estiloActual`,
 `btcdash.plantillas`, `btcdash.plantillaDefecto`, `btcdash.iman`,
-`btcdash.dibujosOcultos`, `btcdash.dibujosBloqueados`, más los `cfg.*`.
+`btcdash.dibujosOcultos`, `btcdash.dibujosBloqueados`, `btcdash.sinCrosshair`,
+más los `cfg.*`.
 
 Estilos y plantillas (`web/src/draw/styles.js`): cualquier cambio de estilo se
 convierte en el defecto de esa herramienta, y una plantilla con nombre es una
